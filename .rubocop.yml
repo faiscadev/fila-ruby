@@ -1,0 +1,16 @@
+AllCops:
+  TargetRubyVersion: 3.1
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - 'lib/fila/proto/**/*'
+
+Metrics/MethodLength:
+  Max: 25
+  Exclude:
+    - 'test/**/*'
+
+Metrics/AbcSize:
+  Max: 25
+  Exclude:
+    - 'test/**/*'
