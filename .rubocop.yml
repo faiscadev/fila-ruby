@@ -4,6 +4,7 @@ AllCops:
   SuggestExtensions: false
   Exclude:
     - 'lib/fila/proto/**/*'
+    - 'vendor/**/*'
 
 Metrics/MethodLength:
   Max: 25
