@@ -25,25 +25,15 @@ jobs:
         with:
           ruby-version: "3.3"
           bundler-cache: true
-      # Build fila-server binary for integration tests.
-      - uses: actions/checkout@v4
-        with:
-          repository: faiscadev/fila
-          path: _server
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            _server/target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: fila-server-${{ runner.os }}-${{ hashFiles('_server/Cargo.lock') }}
-          restore-keys: fila-server-${{ runner.os }}-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo build --release -p fila-server --manifest-path _server/Cargo.toml
+      - name: Download fila-server
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download latest --repo faiscadev/fila --pattern "fila-dev-*-linux-amd64.tar.gz"
+          tar xzf fila-dev-*-linux-amd64.tar.gz
+          mv fila-dev-*/fila-server /usr/local/bin/
+          mv fila-dev-*/fila /usr/local/bin/
+          chmod +x /usr/local/bin/fila-server /usr/local/bin/fila
       - run: bundle exec rake test
         env:
-          FILA_SERVER_BIN: ${{ github.workspace }}/_server/target/release/fila-server
+          FILA_SERVER_BIN: /usr/local/bin/fila-server
