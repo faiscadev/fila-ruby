@@ -2,6 +2,8 @@ name: Publish
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -14,6 +16,4 @@ jobs:
         with:
           ruby-version: "3.3"
       - run: gem build fila-client.gemspec
-      - run: gem push fila-client-*.gem
-        env:
-          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+      - run: ls -la fila-client-*.gem
