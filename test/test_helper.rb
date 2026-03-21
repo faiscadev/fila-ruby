@@ -39,10 +39,10 @@ module TestServerHelper
     toml = "[server]\nlisten_addr = \"#{addr}\"\n"
 
     if tls_config
-      toml += "\n[server.tls]\n"
-      toml += "ca_cert = \"#{tls_config[:ca_cert_path]}\"\n"
-      toml += "server_cert = \"#{tls_config[:server_cert_path]}\"\n"
-      toml += "server_key = \"#{tls_config[:server_key_path]}\"\n"
+      toml += "\n[tls]\n"
+      toml += "cert_file = \"#{tls_config[:server_cert_path]}\"\n"
+      toml += "key_file = \"#{tls_config[:server_key_path]}\"\n"
+      toml += "ca_file = \"#{tls_config[:ca_cert_path]}\"\n" if tls_config[:ca_cert_path]
     end
 
     File.write(config_path, toml)

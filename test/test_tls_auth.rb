@@ -28,9 +28,10 @@ module CertHelper
 
     # Server key + cert signed by CA.
     server_key = OpenSSL::PKey::RSA.new(2048)
-    server_cert = issue_cert(ca_cert, ca_key, server_key, '/CN=localhost', 2, [
-      ['subjectAltName', 'DNS:localhost,IP:127.0.0.1']
-    ])
+    server_cert = issue_cert(
+      ca_cert, ca_key, server_key, '/CN=localhost', 2,
+      [['subjectAltName', 'DNS:localhost,IP:127.0.0.1']]
+    )
 
     # Client key + cert signed by CA (for mTLS).
     client_key = OpenSSL::PKey::RSA.new(2048)
@@ -120,11 +121,13 @@ class TestTlsConnection < Minitest::Test
     @cert_dir = Dir.mktmpdir('fila-certs-')
     @certs = CertHelper.generate_certs(@cert_dir)
 
-    @server = TestServerHelper.start(tls_config: {
-      ca_cert_path: @certs[:ca_cert],
-      server_cert_path: @certs[:server_cert],
-      server_key_path: @certs[:server_key]
-    })
+    @server = TestServerHelper.start(
+      tls_config: {
+        ca_cert_path: @certs[:ca_cert],
+        server_cert_path: @certs[:server_cert],
+        server_key_path: @certs[:server_key]
+      }
+    )
 
     @client = Fila::Client.new(
       @server[:addr],
@@ -165,11 +168,13 @@ class TestMtlsConnection < Minitest::Test
     @cert_dir = Dir.mktmpdir('fila-certs-')
     @certs = CertHelper.generate_certs(@cert_dir)
 
-    @server = TestServerHelper.start(tls_config: {
-      ca_cert_path: @certs[:ca_cert],
-      server_cert_path: @certs[:server_cert],
-      server_key_path: @certs[:server_key]
-    })
+    @server = TestServerHelper.start(
+      tls_config: {
+        ca_cert_path: @certs[:ca_cert],
+        server_cert_path: @certs[:server_cert],
+        server_key_path: @certs[:server_key]
+      }
+    )
 
     @client = Fila::Client.new(
       @server[:addr],
