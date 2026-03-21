@@ -17,7 +17,10 @@ module Fila
   # @example Plain-text (no auth)
   #   client = Fila::Client.new("localhost:5555")
   #
-  # @example TLS
+  # @example TLS with system trust store
+  #   client = Fila::Client.new("localhost:5555", tls: true)
+  #
+  # @example TLS with custom CA
   #   client = Fila::Client.new("localhost:5555", ca_cert: File.read("ca.pem"))
   #
   # @example mTLS + API key
@@ -30,13 +33,14 @@ module Fila
     # Connect to a Fila broker at the given address.
     #
     # @param addr [String] broker address in "host:port" format (e.g., "localhost:5555")
-    # @param ca_cert [String, nil] PEM-encoded CA certificate for TLS verification
+    # @param tls [Boolean] enable TLS using the OS system trust store (default: false)
+    # @param ca_cert [String, nil] PEM-encoded CA certificate for TLS verification (implies tls: true)
     # @param client_cert [String, nil] PEM-encoded client certificate for mTLS
     # @param client_key [String, nil] PEM-encoded client private key for mTLS
     # @param api_key [String, nil] API key for Bearer token authentication
-    def initialize(addr, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
+    def initialize(addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
       @api_key = api_key
-      credentials = build_credentials(ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
+      credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
       @stub = ::Fila::V1::FilaService::Stub.new(addr, credentials)
     end
 
@@ -137,14 +141,26 @@ module Fila
 
     # Build gRPC channel credentials from the provided TLS options.
     #
+    # When +ca_cert+ is provided, it is used for server verification (implies TLS).
+    # When +tls+ is true without +ca_cert+, the OS system trust store is used.
+    # When neither is set and no client certs are given, plaintext is used.
+    #
     # @return [Symbol, GRPC::Core::ChannelCredentials] credentials object
-    def build_credentials(ca_cert:, client_cert:, client_key:)
-      if !ca_cert && (client_cert || client_key)
-        raise ArgumentError, 'ca_cert is required when client_cert or client_key is provided'
-      end
-      return :this_channel_is_insecure unless ca_cert
+    def build_credentials(tls:, ca_cert:, client_cert:, client_key:)
+      tls_enabled = tls || ca_cert
 
-      GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+      if !tls_enabled && (client_cert || client_key)
+        raise ArgumentError, 'tls: true or ca_cert is required when client_cert or client_key is provided'
+      end
+      return :this_channel_is_insecure unless tls_enabled
+
+      if ca_cert
+        GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+      elsif client_cert && client_key
+        GRPC::Core::ChannelCredentials.new(nil, client_key, client_cert)
+      else
+        GRPC::Core::ChannelCredentials.new
+      end
     end
 
     # Return metadata hash for gRPC calls, including Bearer token when api_key is set.

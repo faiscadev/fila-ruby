@@ -44,12 +44,21 @@ end
 client.close
 ```
 
-### TLS
+### TLS (system trust store)
 
 ```ruby
 require "fila"
 
-# Server-side TLS (verify server certificate).
+# TLS using the OS system trust store (e.g., server uses a public CA).
+client = Fila::Client.new("localhost:5555", tls: true)
+```
+
+### TLS (custom CA)
+
+```ruby
+require "fila"
+
+# TLS with an explicit CA certificate (e.g., private/self-signed CA).
 client = Fila::Client.new("localhost:5555",
   ca_cert: File.read("ca.pem")
 )
@@ -60,7 +69,14 @@ client = Fila::Client.new("localhost:5555",
 ```ruby
 require "fila"
 
-# Mutual TLS — both sides present certificates.
+# Mutual TLS with system trust store.
+client = Fila::Client.new("localhost:5555",
+  tls: true,
+  client_cert: File.read("client.pem"),
+  client_key: File.read("client-key.pem")
+)
+
+# Mutual TLS with explicit CA certificate.
 client = Fila::Client.new("localhost:5555",
   ca_cert: File.read("ca.pem"),
   client_cert: File.read("client.pem"),
@@ -95,19 +111,20 @@ client = Fila::Client.new("localhost:5555",
 
 ## API
 
-### `Fila::Client.new(addr, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)`
+### `Fila::Client.new(addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)`
 
 Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
 
 | Parameter | Type | Description |
 |---|---|---|
 | `addr` | `String` | Broker address in `"host:port"` format |
-| `ca_cert:` | `String` or `nil` | PEM-encoded CA certificate for TLS |
+| `tls:` | `Boolean` | Enable TLS using the OS system trust store (default: `false`) |
+| `ca_cert:` | `String` or `nil` | PEM-encoded CA certificate for TLS (implies `tls: true`) |
 | `client_cert:` | `String` or `nil` | PEM-encoded client certificate for mTLS |
 | `client_key:` | `String` or `nil` | PEM-encoded client private key for mTLS |
 | `api_key:` | `String` or `nil` | API key for Bearer token authentication |
 
-When no TLS/auth options are provided, the client connects over plaintext (backward compatible).
+When no TLS/auth options are provided, the client connects over plaintext (backward compatible). When `tls: true` is set without `ca_cert:`, the OS system trust store is used for server certificate verification.
 
 ### `client.enqueue(queue:, headers:, payload:)`
 
