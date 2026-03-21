@@ -44,11 +44,70 @@ end
 client.close
 ```
 
+### TLS
+
+```ruby
+require "fila"
+
+# Server-side TLS (verify server certificate).
+client = Fila::Client.new("localhost:5555",
+  ca_cert: File.read("ca.pem")
+)
+```
+
+### mTLS (mutual TLS)
+
+```ruby
+require "fila"
+
+# Mutual TLS — both sides present certificates.
+client = Fila::Client.new("localhost:5555",
+  ca_cert: File.read("ca.pem"),
+  client_cert: File.read("client.pem"),
+  client_key: File.read("client-key.pem")
+)
+```
+
+### API Key Authentication
+
+```ruby
+require "fila"
+
+# API key sent as Bearer token on every request.
+client = Fila::Client.new("localhost:5555",
+  api_key: "fila_your_api_key_here"
+)
+```
+
+### mTLS + API Key
+
+```ruby
+require "fila"
+
+# Full security: mTLS transport + API key authentication.
+client = Fila::Client.new("localhost:5555",
+  ca_cert: File.read("ca.pem"),
+  client_cert: File.read("client.pem"),
+  client_key: File.read("client-key.pem"),
+  api_key: "fila_your_api_key_here"
+)
+```
+
 ## API
 
-### `Fila::Client.new(addr)`
+### `Fila::Client.new(addr, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)`
 
 Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `addr` | `String` | Broker address in `"host:port"` format |
+| `ca_cert:` | `String` or `nil` | PEM-encoded CA certificate for TLS |
+| `client_cert:` | `String` or `nil` | PEM-encoded client certificate for mTLS |
+| `client_key:` | `String` or `nil` | PEM-encoded client private key for mTLS |
+| `api_key:` | `String` or `nil` | API key for Bearer token authentication |
+
+When no TLS/auth options are provided, the client connects over plaintext (backward compatible).
 
 ### `client.enqueue(queue:, headers:, payload:)`
 

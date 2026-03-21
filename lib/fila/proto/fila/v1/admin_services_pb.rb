@@ -24,6 +24,13 @@ module Fila
         rpc :GetStats, ::Fila::V1::GetStatsRequest, ::Fila::V1::GetStatsResponse
         rpc :Redrive, ::Fila::V1::RedriveRequest, ::Fila::V1::RedriveResponse
         rpc :ListQueues, ::Fila::V1::ListQueuesRequest, ::Fila::V1::ListQueuesResponse
+        # API key management. CreateApiKey bypasses auth (bootstrap); others require a valid key.
+        rpc :CreateApiKey, ::Fila::V1::CreateApiKeyRequest, ::Fila::V1::CreateApiKeyResponse
+        rpc :RevokeApiKey, ::Fila::V1::RevokeApiKeyRequest, ::Fila::V1::RevokeApiKeyResponse
+        rpc :ListApiKeys, ::Fila::V1::ListApiKeysRequest, ::Fila::V1::ListApiKeysResponse
+        # Per-key ACL management.
+        rpc :SetAcl, ::Fila::V1::SetAclRequest, ::Fila::V1::SetAclResponse
+        rpc :GetAcl, ::Fila::V1::GetAclRequest, ::Fila::V1::GetAclResponse
       end
 
       Stub = Service.rpc_stub_class

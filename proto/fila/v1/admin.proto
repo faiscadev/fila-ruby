@@ -11,6 +11,15 @@ service FilaAdmin {
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
   rpc Redrive(RedriveRequest) returns (RedriveResponse);
   rpc ListQueues(ListQueuesRequest) returns (ListQueuesResponse);
+
+  // API key management. CreateApiKey bypasses auth (bootstrap); others require a valid key.
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse);
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
+
+  // Per-key ACL management.
+  rpc SetAcl(SetAclRequest) returns (SetAclResponse);
+  rpc GetAcl(GetAclRequest) returns (GetAclResponse);
 }
 
 message CreateQueueRequest {
@@ -89,6 +98,9 @@ message GetStatsResponse {
   uint32 quantum = 5;
   repeated PerFairnessKeyStats per_key_stats = 6;
   repeated PerThrottleKeyStats per_throttle_stats = 7;
+  // Cluster fields (0 when not in cluster mode).
+  uint64 leader_node_id = 8;
+  uint32 replication_count = 9;
 }
 
 message RedriveRequest {
@@ -107,8 +119,79 @@ message QueueInfo {
   uint64 depth = 2;
   uint64 in_flight = 3;
   uint32 active_consumers = 4;
+  uint64 leader_node_id = 5;
 }
 
 message ListQueuesResponse {
   repeated QueueInfo queues = 1;
+  uint32 cluster_node_count = 2;
+}
+
+// --- API Key Management ---
+
+message CreateApiKeyRequest {
+  /// Human-readable label for the key.
+  string name = 1;
+  /// Optional Unix timestamp (milliseconds) after which the key expires.
+  /// 0 means no expiration.
+  uint64 expires_at_ms = 2;
+  /// When true, the key bypasses all ACL checks (superadmin).
+  bool is_superadmin = 3;
+}
+
+message CreateApiKeyResponse {
+  /// Opaque key ID for management operations (revoke, list, set-acl).
+  string key_id = 1;
+  /// Plaintext API key. Returned once — store it securely.
+  string key = 2;
+  /// Whether this key has superadmin privileges.
+  bool is_superadmin = 3;
+}
+
+message RevokeApiKeyRequest {
+  string key_id = 1;
+}
+
+message RevokeApiKeyResponse {}
+
+message ListApiKeysRequest {}
+
+message ApiKeyInfo {
+  string key_id = 1;
+  string name = 2;
+  uint64 created_at_ms = 3;
+  /// 0 means no expiration.
+  uint64 expires_at_ms = 4;
+  bool is_superadmin = 5;
+}
+
+message ListApiKeysResponse {
+  repeated ApiKeyInfo keys = 1;
+}
+
+// --- ACL Management ---
+
+/// A single permission grant: kind (produce/consume/admin) + queue pattern.
+message AclPermission {
+  /// One of: "produce", "consume", "admin".
+  string kind = 1;
+  /// Queue name or wildcard ("*" or "orders.*").
+  string pattern = 2;
+}
+
+message SetAclRequest {
+  string key_id = 1;
+  repeated AclPermission permissions = 2;
+}
+
+message SetAclResponse {}
+
+message GetAclRequest {
+  string key_id = 1;
+}
+
+message GetAclResponse {
+  string key_id = 1;
+  repeated AclPermission permissions = 2;
+  bool is_superadmin = 3;
 }

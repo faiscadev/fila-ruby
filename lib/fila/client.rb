@@ -14,20 +14,30 @@ module Fila
   #
   # Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
   #
-  # @example
+  # @example Plain-text (no auth)
   #   client = Fila::Client.new("localhost:5555")
-  #   msg_id = client.enqueue(queue: "my-queue", headers: { "tenant" => "acme" }, payload: "hello")
-  #   client.consume(queue: "my-queue") do |msg|
-  #     client.ack(queue: "my-queue", msg_id: msg.id)
-  #     break
-  #   end
-  #   client.close
+  #
+  # @example TLS
+  #   client = Fila::Client.new("localhost:5555", ca_cert: File.read("ca.pem"))
+  #
+  # @example mTLS + API key
+  #   client = Fila::Client.new("localhost:5555",
+  #     ca_cert: File.read("ca.pem"),
+  #     client_cert: File.read("client.pem"),
+  #     client_key: File.read("client-key.pem"),
+  #     api_key: "fila_abc123")
   class Client
     # Connect to a Fila broker at the given address.
     #
     # @param addr [String] broker address in "host:port" format (e.g., "localhost:5555")
-    def initialize(addr)
-      @stub = ::Fila::V1::FilaService::Stub.new(addr, :this_channel_is_insecure)
+    # @param ca_cert [String, nil] PEM-encoded CA certificate for TLS verification
+    # @param client_cert [String, nil] PEM-encoded client certificate for mTLS
+    # @param client_key [String, nil] PEM-encoded client private key for mTLS
+    # @param api_key [String, nil] API key for Bearer token authentication
+    def initialize(addr, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
+      @api_key = api_key
+      credentials = build_credentials(ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
+      @stub = ::Fila::V1::FilaService::Stub.new(addr, credentials)
     end
 
     # Close the underlying gRPC channel.
@@ -50,7 +60,7 @@ module Fila
         headers: headers || {},
         payload: payload
       )
-      resp = @stub.enqueue(req)
+      resp = @stub.enqueue(req, metadata: call_metadata)
       resp.message_id
     rescue GRPC::NotFound => e
       raise QueueNotFoundError, "enqueue: #{e.details}"
@@ -75,7 +85,7 @@ module Fila
       return enum_for(:consume, queue: queue) unless block
 
       req = ::Fila::V1::ConsumeRequest.new(queue: queue)
-      stream = @stub.consume(req)
+      stream = @stub.consume(req, metadata: call_metadata)
       stream.each do |resp|
         msg = resp.message
         next if msg.nil? || msg.id.empty?
@@ -98,7 +108,7 @@ module Fila
     # @raise [RPCError] for unexpected gRPC failures
     def ack(queue:, msg_id:)
       req = ::Fila::V1::AckRequest.new(queue: queue, message_id: msg_id)
-      @stub.ack(req)
+      @stub.ack(req, metadata: call_metadata)
       nil
     rescue GRPC::NotFound => e
       raise MessageNotFoundError, "ack: #{e.details}"
@@ -115,7 +125,7 @@ module Fila
     # @raise [RPCError] for unexpected gRPC failures
     def nack(queue:, msg_id:, error:)
       req = ::Fila::V1::NackRequest.new(queue: queue, message_id: msg_id, error: error)
-      @stub.nack(req)
+      @stub.nack(req, metadata: call_metadata)
       nil
     rescue GRPC::NotFound => e
       raise MessageNotFoundError, "nack: #{e.details}"
@@ -124,6 +134,24 @@ module Fila
     end
 
     private
+
+    # Build gRPC channel credentials from the provided TLS options.
+    #
+    # @return [Symbol, GRPC::Core::ChannelCredentials] credentials object
+    def build_credentials(ca_cert:, client_cert:, client_key:)
+      return :this_channel_is_insecure unless ca_cert
+
+      GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+    end
+
+    # Return metadata hash for gRPC calls, including Bearer token when api_key is set.
+    #
+    # @return [Hash] metadata hash (may be empty)
+    def call_metadata
+      return {} unless @api_key
+
+      { 'authorization' => "Bearer #{@api_key}" }
+    end
 
     def build_consume_message(msg)
       metadata = msg.metadata
