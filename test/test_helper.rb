@@ -51,12 +51,16 @@ module TestServerHelper
     env = { 'FILA_DATA_DIR' => db_dir }
     env['FILA_BOOTSTRAP_APIKEY'] = bootstrap_apikey if bootstrap_apikey
 
-    pid = Process.spawn(
-      env,
-      FILA_SERVER_BIN,
-      chdir: data_dir,
-      %i[out err] => File::NULL
-    )
+    stderr_path = File.join(data_dir, 'stderr.log')
+    pid = File.open(stderr_path, 'w') do |stderr_file|
+      Process.spawn(
+        env,
+        FILA_SERVER_BIN,
+        chdir: data_dir,
+        out: File::NULL,
+        err: stderr_file
+      )
+    end
 
     # Build credentials for admin stub.
     # client_ca_cert_path is always needed to verify server cert; ca_cert_path is only for mTLS.
@@ -90,8 +94,9 @@ module TestServerHelper
     unless ready
       Process.kill('TERM', pid)
       Process.wait(pid)
+      stderr_output = File.read(stderr_path) rescue ''
       FileUtils.rm_rf(data_dir)
-      raise "fila-server failed to start within 10s on #{addr}"
+      raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
     end
 
     admin_stub = ::Fila::V1::FilaAdmin::Stub.new(addr, credentials)
