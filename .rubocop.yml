@@ -15,3 +15,20 @@ Metrics/AbcSize:
   Max: 25
   Exclude:
     - 'test/**/*'
+
+Metrics/CyclomaticComplexity:
+  Exclude:
+    - 'test/**/*'
+
+Metrics/PerceivedComplexity:
+  Exclude:
+    - 'test/**/*'
+
+Metrics/ParameterLists:
+  Max: 6
+  Exclude:
+    - 'test/**/*'
+
+Style/OneClassPerFile:
+  Exclude:
+    - 'test/**/*'
