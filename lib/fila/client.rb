@@ -148,15 +148,24 @@ module Fila
     # @return [Symbol, GRPC::Core::ChannelCredentials] credentials object
     def build_credentials(tls:, ca_cert:, client_cert:, client_key:)
       tls_enabled = tls || ca_cert
-
-      if !tls_enabled && (client_cert || client_key)
-        raise ArgumentError, 'tls: true or ca_cert is required when client_cert or client_key is provided'
-      end
+      validate_tls_options(tls_enabled, client_cert, client_key)
       return :this_channel_is_insecure unless tls_enabled
+
+      build_channel_credentials(ca_cert, client_cert, client_key)
+    end
+
+    def validate_tls_options(tls_enabled, client_cert, client_key)
+      return if tls_enabled || (!client_cert && !client_key)
+
+      raise ArgumentError, 'tls: true or ca_cert is required when client_cert or client_key is provided'
+    end
+
+    def build_channel_credentials(ca_cert, client_cert, client_key)
+      has_client_certs = client_cert && client_key
 
       if ca_cert
         GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
-      elsif client_cert && client_key
+      elsif has_client_certs
         GRPC::Core::ChannelCredentials.new(nil, client_key, client_cert)
       else
         GRPC::Core::ChannelCredentials.new
