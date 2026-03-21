@@ -174,7 +174,9 @@ class TestMtlsConnection < Minitest::Test
       tls_config: {
         ca_cert_path: @certs[:ca_cert],
         server_cert_path: @certs[:server_cert],
-        server_key_path: @certs[:server_key]
+        server_key_path: @certs[:server_key],
+        client_cert_path: @certs[:client_cert],
+        client_key_path: @certs[:client_key]
       }
     )
 

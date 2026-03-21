@@ -139,6 +139,9 @@ module Fila
     #
     # @return [Symbol, GRPC::Core::ChannelCredentials] credentials object
     def build_credentials(ca_cert:, client_cert:, client_key:)
+      if !ca_cert && (client_cert || client_key)
+        raise ArgumentError, 'ca_cert is required when client_cert or client_key is provided'
+      end
       return :this_channel_is_insecure unless ca_cert
 
       GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)

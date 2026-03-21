@@ -63,10 +63,12 @@ module TestServerHelper
     credentials = :this_channel_is_insecure
     if tls_config
       ca_path = tls_config[:client_ca_cert_path] || tls_config[:ca_cert_path]
-      ca_cert = File.read(ca_path)
-      client_key = tls_config[:client_key_path] ? File.read(tls_config[:client_key_path]) : nil
-      client_cert = tls_config[:client_cert_path] ? File.read(tls_config[:client_cert_path]) : nil
-      credentials = GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+      if ca_path
+        ca_cert = File.read(ca_path)
+        client_key = tls_config[:client_key_path] ? File.read(tls_config[:client_key_path]) : nil
+        client_cert = tls_config[:client_cert_path] ? File.read(tls_config[:client_cert_path]) : nil
+        credentials = GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+      end
     end
 
     admin_metadata = {}
