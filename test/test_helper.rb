@@ -94,7 +94,11 @@ module TestServerHelper
     unless ready
       Process.kill('TERM', pid)
       Process.wait(pid)
-      stderr_output = File.read(stderr_path) rescue ''
+      stderr_output = begin
+        File.read(stderr_path)
+      rescue StandardError
+        ''
+      end
       FileUtils.rm_rf(data_dir)
       raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
     end
