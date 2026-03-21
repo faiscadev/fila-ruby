@@ -51,20 +51,19 @@ module TestServerHelper
     env = { 'FILA_DATA_DIR' => db_dir }
     env['FILA_BOOTSTRAP_APIKEY'] = bootstrap_apikey if bootstrap_apikey
 
-    stderr_path = File.join(data_dir, 'stderr.log')
-    stderr_file = File.open(stderr_path, 'w')
     pid = Process.spawn(
       env,
       FILA_SERVER_BIN,
       chdir: data_dir,
-      out: File::NULL,
-      err: stderr_file
+      %i[out err] => File::NULL
     )
 
     # Build credentials for admin stub.
+    # client_ca_cert_path is always needed to verify server cert; ca_cert_path is only for mTLS.
     credentials = :this_channel_is_insecure
     if tls_config
-      ca_cert = File.read(tls_config[:ca_cert_path])
+      ca_path = tls_config[:client_ca_cert_path] || tls_config[:ca_cert_path]
+      ca_cert = File.read(ca_path)
       client_key = tls_config[:client_key_path] ? File.read(tls_config[:client_key_path]) : nil
       client_cert = tls_config[:client_cert_path] ? File.read(tls_config[:client_cert_path]) : nil
       credentials = GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
@@ -89,10 +88,8 @@ module TestServerHelper
     unless ready
       Process.kill('TERM', pid)
       Process.wait(pid)
-      stderr_file.close
-      stderr_output = File.read(stderr_path) rescue ''
       FileUtils.rm_rf(data_dir)
-      raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
+      raise "fila-server failed to start within 10s on #{addr}"
     end
 
     admin_stub = ::Fila::V1::FilaAdmin::Stub.new(addr, credentials)

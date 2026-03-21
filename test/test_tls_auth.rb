@@ -121,11 +121,13 @@ class TestTlsConnection < Minitest::Test
     @cert_dir = Dir.mktmpdir('fila-certs-')
     @certs = CertHelper.generate_certs(@cert_dir)
 
+    # Server-only TLS: omit ca_cert_path so server does not require client certs.
+    # client_ca_cert_path is used by the test client to verify the server cert.
     @server = TestServerHelper.start(
       tls_config: {
-        ca_cert_path: @certs[:ca_cert],
         server_cert_path: @certs[:server_cert],
-        server_key_path: @certs[:server_key]
+        server_key_path: @certs[:server_key],
+        client_ca_cert_path: @certs[:ca_cert]
       }
     )
 
@@ -204,11 +206,13 @@ class TestTlsWithApiKey < Minitest::Test
     @certs = CertHelper.generate_certs(@cert_dir)
     @bootstrap_key = 'tls-bootstrap-key-67890'
 
+    # Server-only TLS + API key: omit ca_cert_path so server does not require client certs.
+    # client_ca_cert_path is used by the test client to verify the server cert.
     @server = TestServerHelper.start(
       tls_config: {
-        ca_cert_path: @certs[:ca_cert],
         server_cert_path: @certs[:server_cert],
-        server_key_path: @certs[:server_key]
+        server_key_path: @certs[:server_key],
+        client_ca_cert_path: @certs[:ca_cert]
       },
       bootstrap_apikey: @bootstrap_key
     )
