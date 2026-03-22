@@ -40,8 +40,8 @@ module Fila
     # @param api_key [String, nil] API key for Bearer token authentication
     def initialize(addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
       @api_key = api_key
-      credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
-      @stub = ::Fila::V1::FilaService::Stub.new(addr, credentials)
+      @credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
+      @stub = ::Fila::V1::FilaService::Stub.new(addr, @credentials)
     end
 
     # Close the underlying gRPC channel.
@@ -88,20 +88,7 @@ module Fila
     def consume(queue:, &block)
       return enum_for(:consume, queue: queue) unless block
 
-      req = ::Fila::V1::ConsumeRequest.new(queue: queue)
-      stream = @stub.consume(req, metadata: call_metadata)
-      stream.each do |resp|
-        msg = resp.message
-        next if msg.nil? || msg.id.empty?
-
-        block.call(build_consume_message(msg))
-      end
-    rescue GRPC::Cancelled
-      # Stream cancelled — normal when consumer breaks out of the loop.
-    rescue GRPC::NotFound => e
-      raise QueueNotFoundError, "consume: #{e.details}"
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
+      consume_with_redirect(queue: queue, redirected: false, &block)
     end
 
     # Acknowledge a successfully processed message.
@@ -138,6 +125,45 @@ module Fila
     end
 
     private
+
+    LEADER_ADDR_KEY = 'x-fila-leader-addr'
+
+    # Execute consume against a stub, following a leader hint redirect once.
+    #
+    # @param queue [String] queue to consume from
+    # @param redirected [Boolean] whether this is already a redirect attempt
+    def consume_with_redirect(queue:, redirected:, &block)
+      req = ::Fila::V1::ConsumeRequest.new(queue: queue)
+      stream = @stub.consume(req, metadata: call_metadata)
+      stream.each do |resp|
+        msg = resp.message
+        next if msg.nil? || msg.id.empty?
+
+        block.call(build_consume_message(msg))
+      end
+    rescue GRPC::Cancelled
+      # Stream cancelled — normal when consumer breaks out of the loop.
+    rescue GRPC::NotFound => e
+      raise QueueNotFoundError, "consume: #{e.details}"
+    rescue GRPC::Unavailable => e
+      leader_addr = extract_leader_addr(e)
+      raise RPCError.new(e.code, e.details) if leader_addr.nil? || redirected
+
+      @stub = ::Fila::V1::FilaService::Stub.new(leader_addr, @credentials)
+      consume_with_redirect(queue: queue, redirected: true, &block)
+    rescue GRPC::BadStatus => e
+      raise RPCError.new(e.code, e.details)
+    end
+
+    # Extract the leader address from an UNAVAILABLE error's trailing metadata.
+    #
+    # @param err [GRPC::Unavailable] the gRPC error
+    # @return [String, nil] leader address or nil if not present
+    def extract_leader_addr(err)
+      err.metadata[LEADER_ADDR_KEY]
+    rescue StandardError
+      nil
+    end
 
     # Build gRPC channel credentials from the provided TLS options.
     #
