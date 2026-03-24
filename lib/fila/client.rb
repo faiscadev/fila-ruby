@@ -140,14 +140,9 @@ module Fila
     end
 
     def build_channel_credentials(ca_cert, client_cert, client_key)
-      has_client_certs = client_cert && client_key
-
-      if ca_cert
-        GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
-      elsif has_client_certs
-        GRPC::Core::ChannelCredentials.new(nil, client_key, client_cert)
-      else
-        GRPC::Core::ChannelCredentials.new
+      if ca_cert then GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+      elsif client_cert && client_key then GRPC::Core::ChannelCredentials.new(nil, client_key, client_cert)
+      else GRPC::Core::ChannelCredentials.new
       end
     end
 
