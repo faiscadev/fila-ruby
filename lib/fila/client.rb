@@ -60,19 +60,8 @@ module Fila
       raise RPCError.new(e.code, e.details)
     end
 
-    # Open a streaming consumer on the specified queue.
-    #
-    # Yields messages as they become available. Nil message frames (keepalive
-    # signals) are skipped automatically. Nacked messages are redelivered on
-    # the same stream.
-    #
-    # If no block is given, returns an Enumerator.
-    #
-    # @param queue [String] queue to consume from
-    # @yield [ConsumeMessage] each message received from the broker
-    # @return [Enumerator<ConsumeMessage>] if no block given
-    # @raise [QueueNotFoundError] if the queue does not exist
-    # @raise [RPCError] for unexpected gRPC failures
+    # Open a streaming consumer. Yields messages as they arrive.
+    # Returns an Enumerator if no block given.
     def consume(queue:, &block)
       return enum_for(:consume, queue: queue) unless block
 
