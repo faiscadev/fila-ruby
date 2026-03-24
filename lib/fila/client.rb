@@ -156,13 +156,6 @@ module Fila
       nil
     end
 
-    # Build gRPC channel credentials from the provided TLS options.
-    #
-    # When +ca_cert+ is provided, it is used for server verification (implies TLS).
-    # When +tls+ is true without +ca_cert+, the OS system trust store is used.
-    # When neither is set and no client certs are given, plaintext is used.
-    #
-    # @return [Symbol, GRPC::Core::ChannelCredentials] credentials object
     def build_credentials(tls:, ca_cert:, client_cert:, client_key:)
       tls_enabled = tls || ca_cert
       validate_tls_options(tls_enabled, client_cert, client_key)
