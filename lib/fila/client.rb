@@ -124,30 +124,25 @@ module Fila
       raise RPCError.new(e.code, e.details)
     end
 
-    private
-
     LEADER_ADDR_KEY = 'x-fila-leader-addr'
 
-    # Execute consume against a stub, following a leader hint redirect once.
-    #
-    # @param queue [String] queue to consume from
-    # @param redirected [Boolean] whether this is already a redirect attempt
-    def consume_with_redirect(queue:, redirected:, &block)
-      req = ::Fila::V1::ConsumeRequest.new(queue: queue)
-      stream = @stub.consume(req, metadata: call_metadata)
+    private_constant :LEADER_ADDR_KEY
+
+    private
+
+    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics/AbcSize
+      stream = @stub.consume(::Fila::V1::ConsumeRequest.new(queue: queue), metadata: call_metadata)
       stream.each do |resp|
         msg = resp.message
         next if msg.nil? || msg.id.empty?
 
         block.call(build_consume_message(msg))
       end
-    rescue GRPC::Cancelled
-      # Stream cancelled — normal when consumer breaks out of the loop.
+    rescue GRPC::Cancelled then nil
     rescue GRPC::NotFound => e
       raise QueueNotFoundError, "consume: #{e.details}"
     rescue GRPC::Unavailable => e
-      leader_addr = extract_leader_addr(e)
-      raise RPCError.new(e.code, e.details) if leader_addr.nil? || redirected
+      raise RPCError.new(e.code, e.details) if (leader_addr = extract_leader_addr(e)).nil? || redirected
 
       @stub = ::Fila::V1::FilaService::Stub.new(leader_addr, @credentials)
       consume_with_redirect(queue: queue, redirected: true, &block)
@@ -155,10 +150,6 @@ module Fila
       raise RPCError.new(e.code, e.details)
     end
 
-    # Extract the leader address from an UNAVAILABLE error's trailing metadata.
-    #
-    # @param err [GRPC::Unavailable] the gRPC error
-    # @return [String, nil] leader address or nil if not present
     def extract_leader_addr(err)
       err.metadata[LEADER_ADDR_KEY]
     rescue StandardError
