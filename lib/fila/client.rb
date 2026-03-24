@@ -44,11 +44,7 @@ module Fila
       @stub = ::Fila::V1::FilaService::Stub.new(addr, @credentials)
     end
 
-    # Close the underlying gRPC channel.
-    def close
-      # grpc-ruby doesn't expose a direct channel close on stubs;
-      # the channel is garbage-collected. This is a no-op for API symmetry.
-    end
+    def close; end
 
     # Enqueue a message to the specified queue.
     #
@@ -182,9 +178,6 @@ module Fila
       end
     end
 
-    # Return metadata hash for gRPC calls, including Bearer token when api_key is set.
-    #
-    # @return [Hash] metadata hash (may be empty)
     def call_metadata
       return {} unless @api_key
 
