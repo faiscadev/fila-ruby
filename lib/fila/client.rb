@@ -30,14 +30,6 @@ module Fila
   #     client_key: File.read("client-key.pem"),
   #     api_key: "fila_abc123")
   class Client
-    # Connect to a Fila broker at the given address.
-    #
-    # @param addr [String] broker address in "host:port" format (e.g., "localhost:5555")
-    # @param tls [Boolean] enable TLS using the OS system trust store (default: false)
-    # @param ca_cert [String, nil] PEM-encoded CA certificate for TLS verification (implies tls: true)
-    # @param client_cert [String, nil] PEM-encoded client certificate for mTLS
-    # @param client_key [String, nil] PEM-encoded client private key for mTLS
-    # @param api_key [String, nil] API key for Bearer token authentication
     def initialize(addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
       @api_key = api_key
       @credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
