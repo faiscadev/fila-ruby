@@ -38,14 +38,6 @@ module Fila
 
     def close; end
 
-    # Enqueue a message to the specified queue.
-    #
-    # @param queue [String] target queue name
-    # @param headers [Hash<String, String>, nil] optional message headers
-    # @param payload [String] message payload bytes
-    # @return [String] broker-assigned message ID (UUIDv7)
-    # @raise [QueueNotFoundError] if the queue does not exist
-    # @raise [RPCError] for unexpected gRPC failures
     def enqueue(queue:, payload:, headers: nil)
       req = ::Fila::V1::EnqueueRequest.new(
         queue: queue,
