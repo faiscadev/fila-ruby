@@ -8,20 +8,26 @@ $LOAD_PATH.unshift(File.expand_path('proto', __dir__)) unless $LOAD_PATH.include
 require_relative 'proto/fila/v1/service_services_pb'
 require_relative 'errors'
 require_relative 'consume_message'
+require_relative 'batch_enqueue_result'
+require_relative 'batcher'
 
 module Fila
   # Client for the Fila message broker.
   #
   # Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
   #
-  # @example Plain-text (no auth)
+  # @example Plain-text, default auto-batching
   #   client = Fila::Client.new("localhost:5555")
+  #
+  # @example Batching disabled
+  #   client = Fila::Client.new("localhost:5555", batch_mode: :disabled)
+  #
+  # @example Linger-based batching
+  #   client = Fila::Client.new("localhost:5555",
+  #     batch_mode: :linger, linger_ms: 10, batch_size: 50)
   #
   # @example TLS with system trust store
   #   client = Fila::Client.new("localhost:5555", tls: true)
-  #
-  # @example TLS with custom CA
-  #   client = Fila::Client.new("localhost:5555", ca_cert: File.read("ca.pem"))
   #
   # @example mTLS + API key
   #   client = Fila::Client.new("localhost:5555",
@@ -29,30 +35,106 @@ module Fila
   #     client_cert: File.read("client.pem"),
   #     client_key: File.read("client-key.pem"),
   #     api_key: "fila_abc123")
-  class Client
-    def initialize(addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
+  class Client # rubocop:disable Metrics/ClassLength
+    # Valid batch mode values.
+    BATCH_MODES = %i[auto linger disabled].freeze
+
+    private_constant :BATCH_MODES
+
+    # @param addr [String] server address (host:port)
+    # @param tls [Boolean] enable TLS with system trust store
+    # @param ca_cert [String, nil] PEM-encoded CA certificate
+    # @param client_cert [String, nil] PEM-encoded client certificate (mTLS)
+    # @param client_key [String, nil] PEM-encoded client key (mTLS)
+    # @param api_key [String, nil] API key for authentication
+    # @param batch_mode [Symbol] :auto (default), :linger, or :disabled
+    # @param max_batch_size [Integer] max batch size for auto mode (default: 100)
+    # @param batch_size [Integer] batch size for linger mode (default: 100)
+    # @param linger_ms [Integer] linger time in ms for linger mode (default: 10)
+    def initialize( # rubocop:disable Metrics/ParameterLists
+      addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil,
+      api_key: nil, batch_mode: :auto, max_batch_size: 100,
+      batch_size: 100, linger_ms: 10
+    )
+      validate_batch_mode(batch_mode)
       @api_key = api_key
       @credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
       @stub = ::Fila::V1::FilaService::Stub.new(addr, @credentials)
+      @batcher = start_batcher(batch_mode, max_batch_size, batch_size, linger_ms)
     end
 
-    def close; end
+    # Drain pending batched messages and disconnect.
+    def close
+      @batcher&.close
+      @batcher = nil
+    end
 
+    # Enqueue a message to a queue.
+    #
+    # When batching is enabled (default), the message is submitted to
+    # the background batcher. At low load each message is sent
+    # individually; at high load messages cluster into batches.
+    #
+    # @param queue [String] target queue name
+    # @param payload [String] message payload
+    # @param headers [Hash<String,String>, nil] optional headers
+    # @return [String] broker-assigned message ID
+    # @raise [QueueNotFoundError] if the queue does not exist
+    # @raise [RPCError] for unexpected gRPC failures
     def enqueue(queue:, payload:, headers: nil)
       req = ::Fila::V1::EnqueueRequest.new(
         queue: queue,
         headers: headers || {},
         payload: payload
       )
-      resp = @stub.enqueue(req, metadata: call_metadata)
-      resp.message_id
-    rescue GRPC::NotFound => e
-      raise QueueNotFoundError, "enqueue: #{e.details}"
+
+      if @batcher
+        @batcher.submit(req)
+      else
+        enqueue_direct(req)
+      end
+    end
+
+    # Enqueue a batch of messages in a single RPC call.
+    #
+    # Each message is independently validated and processed. A failed
+    # message does not affect the others. Returns an array of
+    # BatchEnqueueResult with one result per input message, in order.
+    #
+    # This bypasses the background batcher and always uses the
+    # BatchEnqueue RPC directly.
+    #
+    # @param messages [Array<Hash>] messages to enqueue; each hash has
+    #   keys :queue (String), :payload (String), and optionally
+    #   :headers (Hash<String,String>)
+    # @return [Array<BatchEnqueueResult>]
+    # @raise [RPCError] for transport-level gRPC failures
+    def batch_enqueue(messages)
+      proto_messages = messages.map do |m|
+        ::Fila::V1::EnqueueRequest.new(
+          queue: m[:queue],
+          headers: m[:headers] || {},
+          payload: m[:payload]
+        )
+      end
+
+      req = ::Fila::V1::BatchEnqueueRequest.new(messages: proto_messages)
+      resp = @stub.batch_enqueue(req, metadata: call_metadata)
+
+      resp.results.map do |r|
+        if r.result == :success
+          BatchEnqueueResult.new(message_id: r.success.message_id)
+        else
+          BatchEnqueueResult.new(error: r.error)
+        end
+      end
     rescue GRPC::BadStatus => e
       raise RPCError.new(e.code, e.details)
     end
 
     # Open a streaming consumer. Yields messages as they arrive.
+    # Transparently unpacks batched delivery (repeated messages field)
+    # with fallback to singular message field.
     # Returns an Enumerator if no block given.
     def consume(queue:, &block)
       return enum_for(:consume, queue: queue) unless block
@@ -99,13 +181,38 @@ module Fila
 
     private
 
-    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics/AbcSize
+    def validate_batch_mode(mode)
+      return if BATCH_MODES.include?(mode)
+
+      raise ArgumentError, "invalid batch_mode: #{mode.inspect}, must be one of #{BATCH_MODES.inspect}"
+    end
+
+    def start_batcher(mode, max_batch_size, batch_size, linger_ms)
+      return nil if mode == :disabled
+
+      Batcher.new(
+        stub: @stub,
+        metadata: call_metadata,
+        mode: mode,
+        max_batch_size: max_batch_size,
+        batch_size: batch_size,
+        linger_ms: linger_ms
+      )
+    end
+
+    def enqueue_direct(req)
+      resp = @stub.enqueue(req, metadata: call_metadata)
+      resp.message_id
+    rescue GRPC::NotFound => e
+      raise QueueNotFoundError, "enqueue: #{e.details}"
+    rescue GRPC::BadStatus => e
+      raise RPCError.new(e.code, e.details)
+    end
+
+    def consume_with_redirect(queue:, redirected:, &block)
       stream = @stub.consume(::Fila::V1::ConsumeRequest.new(queue: queue), metadata: call_metadata)
       stream.each do |resp|
-        msg = resp.message
-        next if msg.nil? || msg.id.empty?
-
-        block.call(build_consume_message(msg))
+        yield_messages_from_response(resp, &block)
       end
     rescue GRPC::Cancelled then nil
     rescue GRPC::NotFound => e
@@ -117,6 +224,25 @@ module Fila
       consume_with_redirect(queue: queue, redirected: true, &block)
     rescue GRPC::BadStatus => e
       raise RPCError.new(e.code, e.details)
+    end
+
+    # Unpack messages from a ConsumeResponse. Prefers the repeated
+    # messages field (batched delivery); falls back to singular message
+    # field for backward compatibility with older servers.
+    def yield_messages_from_response(resp, &block)
+      msgs = resp.messages
+      if msgs && !msgs.empty?
+        msgs.each do |msg|
+          next if msg.nil? || msg.id.empty?
+
+          block.call(build_consume_message(msg))
+        end
+      else
+        msg = resp.message
+        return if msg.nil? || msg.id.empty?
+
+        block.call(build_consume_message(msg))
+      end
     end
 
     def extract_leader_addr(err)
