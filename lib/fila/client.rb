@@ -152,7 +152,8 @@ module Fila
       resp = @stub.ack(req, metadata: call_metadata)
 
       result = resp.results.first
-      return if result.nil? || result.result == :success
+      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
+      return if result.result == :success
 
       err = result.error
       case err.code
@@ -178,7 +179,8 @@ module Fila
       resp = @stub.nack(req, metadata: call_metadata)
 
       result = resp.results.first
-      return if result.nil? || result.result == :success
+      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
+      return if result.result == :success
 
       err = result.error
       case err.code

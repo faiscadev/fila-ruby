@@ -43,9 +43,9 @@ class TestEnqueueMany < Minitest::Test
   def test_enqueue_many_single_message
     TestServerHelper.create_queue(@server, 'many-single')
 
-    results = @client.enqueue_many([
-      { queue: 'many-single', payload: 'solo' }
-    ])
+    results = @client.enqueue_many(
+      [{ queue: 'many-single', payload: 'solo' }]
+    )
 
     assert_equal 1, results.size
     assert results.first.success?
@@ -69,10 +69,10 @@ class TestEnqueueMany < Minitest::Test
     results = @client.enqueue_many(messages)
     assert_equal 3, results.size
 
-    assert results[0].success?, "first message should succeed"
-    refute results[1].success?, "second message should fail (nonexistent queue)"
-    assert results[1].error, "second message should have error description"
-    assert results[2].success?, "third message should succeed"
+    assert results[0].success?, 'first message should succeed'
+    refute results[1].success?, 'second message should fail (nonexistent queue)'
+    assert results[1].error, 'second message should have error description'
+    assert results[2].success?, 'third message should succeed'
   end
 end
 
