@@ -1,13 +1,13 @@
 # frozen_string_literal: true
 
 module Fila
-  # Result of a single message within a batch enqueue call.
+  # Result of a single message within an enqueue_many call.
   #
-  # Each message in a batch is independently validated and processed.
+  # Each message is independently validated and processed.
   # A failed message does not affect the others.
   #
   # @example
-  #   results = client.batch_enqueue(messages)
+  #   results = client.enqueue_many(messages)
   #   results.each do |r|
   #     if r.success?
   #       puts "Enqueued: #{r.message_id}"
@@ -15,7 +15,7 @@ module Fila
   #       puts "Failed: #{r.error}"
   #     end
   #   end
-  class BatchEnqueueResult
+  class EnqueueResult
     # @return [String, nil] broker-assigned message ID on success
     attr_reader :message_id
 

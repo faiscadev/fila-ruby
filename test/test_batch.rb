@@ -4,7 +4,7 @@ require 'test_helper'
 
 return unless FILA_SERVER_AVAILABLE
 
-class TestBatchEnqueue < Minitest::Test
+class TestEnqueueMany < Minitest::Test
   def setup
     @server = TestServerHelper.start
     @client = Fila::Client.new(@server[:addr], batch_mode: :disabled)
@@ -15,14 +15,14 @@ class TestBatchEnqueue < Minitest::Test
     TestServerHelper.stop(@server) if @server
   end
 
-  def test_batch_enqueue_multiple_messages
-    TestServerHelper.create_queue(@server, 'batch-test')
+  def test_enqueue_many_multiple_messages
+    TestServerHelper.create_queue(@server, 'many-test')
 
     messages = 5.times.map do |i|
-      { queue: 'batch-test', payload: "batch-msg-#{i}", headers: { 'index' => i.to_s } }
+      { queue: 'many-test', payload: "many-msg-#{i}", headers: { 'index' => i.to_s } }
     end
 
-    results = @client.batch_enqueue(messages)
+    results = @client.enqueue_many(messages)
 
     assert_equal 5, results.size
     results.each do |r|
@@ -32,19 +32,19 @@ class TestBatchEnqueue < Minitest::Test
 
     # Verify all messages are consumable.
     received_ids = []
-    @client.consume(queue: 'batch-test') do |msg|
+    @client.consume(queue: 'many-test') do |msg|
       received_ids << msg.id
-      @client.ack(queue: 'batch-test', msg_id: msg.id)
+      @client.ack(queue: 'many-test', msg_id: msg.id)
       break if received_ids.size >= 5
     end
     assert_equal 5, received_ids.size
   end
 
-  def test_batch_enqueue_single_message
-    TestServerHelper.create_queue(@server, 'batch-single')
+  def test_enqueue_many_single_message
+    TestServerHelper.create_queue(@server, 'many-single')
 
-    results = @client.batch_enqueue([
-      { queue: 'batch-single', payload: 'solo' }
+    results = @client.enqueue_many([
+      { queue: 'many-single', payload: 'solo' }
     ])
 
     assert_equal 1, results.size
@@ -52,21 +52,21 @@ class TestBatchEnqueue < Minitest::Test
     refute_empty results.first.message_id
   end
 
-  def test_batch_enqueue_empty_array
-    results = @client.batch_enqueue([])
+  def test_enqueue_many_empty_array
+    results = @client.enqueue_many([])
     assert_equal 0, results.size
   end
 
-  def test_batch_enqueue_mixed_success_and_failure
-    TestServerHelper.create_queue(@server, 'batch-mixed')
+  def test_enqueue_many_mixed_success_and_failure
+    TestServerHelper.create_queue(@server, 'many-mixed')
 
     messages = [
-      { queue: 'batch-mixed', payload: 'good-1' },
+      { queue: 'many-mixed', payload: 'good-1' },
       { queue: 'no-such-queue-xyz', payload: 'bad' },
-      { queue: 'batch-mixed', payload: 'good-2' }
+      { queue: 'many-mixed', payload: 'good-2' }
     ]
 
-    results = @client.batch_enqueue(messages)
+    results = @client.enqueue_many(messages)
     assert_equal 3, results.size
 
     assert results[0].success?, "first message should succeed"
@@ -76,16 +76,16 @@ class TestBatchEnqueue < Minitest::Test
   end
 end
 
-class TestBatchEnqueueResult < Minitest::Test
+class TestEnqueueResult < Minitest::Test
   def test_success_result
-    r = Fila::BatchEnqueueResult.new(message_id: 'abc-123')
+    r = Fila::EnqueueResult.new(message_id: 'abc-123')
     assert r.success?
     assert_equal 'abc-123', r.message_id
     assert_nil r.error
   end
 
   def test_error_result
-    r = Fila::BatchEnqueueResult.new(error: 'queue not found')
+    r = Fila::EnqueueResult.new(error: 'queue not found')
     refute r.success?
     assert_nil r.message_id
     assert_equal 'queue not found', r.error
