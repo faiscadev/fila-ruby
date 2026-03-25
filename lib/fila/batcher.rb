@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
 module Fila
-  # Background batcher that collects enqueue requests and flushes them
-  # in batches via BatchEnqueue RPC. Supports auto (opportunistic) and
-  # linger (timer-based) modes.
+  # Background batcher that collects enqueue messages and flushes them
+  # in batches via the unified Enqueue RPC. Supports auto (opportunistic)
+  # and linger (timer-based) modes.
   #
   # @api private
-  class Batcher
+  class Batcher # rubocop:disable Metrics/ClassLength
     # An item queued for batching, pairing a message with its result slot.
-    BatchItem = Struct.new(:request, :result_queue, keyword_init: true)
+    BatchItem = Struct.new(:message, :result_queue, keyword_init: true)
 
     # @param stub [Fila::V1::FilaService::Stub] gRPC stub
     # @param metadata [Hash] call metadata (auth headers)
@@ -33,13 +33,13 @@ module Fila
     # Submit a message for batched sending. Blocks until the batch
     # containing this message is flushed and the result is available.
     #
-    # @param request [Fila::V1::EnqueueRequest] the enqueue request
+    # @param message [Fila::V1::EnqueueMessage] the enqueue message
     # @return [String] message ID on success
     # @raise [Fila::QueueNotFoundError] if the queue does not exist
     # @raise [Fila::RPCError] for unexpected gRPC failures
-    def submit(request)
+    def submit(message)
       result_queue = Queue.new
-      item = BatchItem.new(request: request, result_queue: result_queue)
+      item = BatchItem.new(message: message, result_queue: result_queue)
 
       @mutex.synchronize do
         raise Fila::Error, 'batcher is closed' if @stopped
@@ -128,51 +128,35 @@ module Fila
       end
     end
 
-    # Flush a batch of items. Uses single Enqueue RPC for 1 message
-    # (preserves exact error types like QueueNotFoundError), and
-    # BatchEnqueue RPC for 2+ messages.
+    # Flush a batch of items via the unified Enqueue RPC.
     def flush_batch(items)
-      if items.size == 1
-        flush_single(items.first)
-      else
-        flush_multi(items)
-      end
-    end
-
-    def flush_single(item)
-      resp = @stub.enqueue(item.request, metadata: @metadata)
-      item.result_queue.push(resp.message_id)
-    rescue GRPC::NotFound => e
-      item.result_queue.push(QueueNotFoundError.new("enqueue: #{e.details}"))
-    rescue GRPC::BadStatus => e
-      item.result_queue.push(RPCError.new(e.code, e.details))
-    rescue StandardError => e
-      item.result_queue.push(Fila::Error.new(e.message))
-    end
-
-    def flush_multi(items)
-      req = ::Fila::V1::BatchEnqueueRequest.new(
-        messages: items.map(&:request)
-      )
-      resp = @stub.batch_enqueue(req, metadata: @metadata)
-      results = resp.results
+      req = ::Fila::V1::EnqueueRequest.new(messages: items.map(&:message))
+      results = @stub.enqueue(req, metadata: @metadata).results
 
       items.each_with_index do |item, idx|
-        result = results[idx]
-        if result.nil?
-          item.result_queue.push(Fila::Error.new('no result from server'))
-        elsif result.result == :success
-          item.result_queue.push(result.success.message_id)
-        else
-          item.result_queue.push(RPCError.new(GRPC::Core::StatusCodes::INTERNAL, result.error))
-        end
+        item.result_queue.push(result_to_outcome(results[idx]))
       end
     rescue GRPC::BadStatus => e
-      # Transport-level failure: all messages in this batch get the error.
-      err = RPCError.new(e.code, e.details)
-      items.each { |item| item.result_queue.push(err) }
+      broadcast_error(items, RPCError.new(e.code, e.details))
     rescue StandardError => e
-      err = Fila::Error.new(e.message)
+      broadcast_error(items, Fila::Error.new(e.message))
+    end
+
+    # Convert a single proto EnqueueResult into a String (message_id) or Exception.
+    def result_to_outcome(result)
+      return Fila::Error.new('no result from server') if result.nil?
+      return result.message_id if result.result == :message_id
+
+      err = result.error
+      case err.code
+      when :ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND
+        QueueNotFoundError.new("enqueue: #{err.message}")
+      else
+        RPCError.new(GRPC::Core::StatusCodes::INTERNAL, err.message)
+      end
+    end
+
+    def broadcast_error(items, err)
       items.each { |item| item.result_queue.push(err) }
     end
 
@@ -185,13 +169,11 @@ module Fila
     def pop_with_timeout(timeout_ms)
       deadline = current_time_ms + timeout_ms
       loop do
-        begin
-          return @queue.pop(true)
-        rescue ThreadError
-          raise if current_time_ms >= deadline
+        return @queue.pop(true)
+      rescue ThreadError
+        raise if current_time_ms >= deadline
 
-          sleep(0.001) # 1ms polling interval
-        end
+        sleep(0.001) # 1ms polling interval
       end
     end
   end

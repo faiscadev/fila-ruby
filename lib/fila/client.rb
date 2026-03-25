@@ -8,7 +8,7 @@ $LOAD_PATH.unshift(File.expand_path('proto', __dir__)) unless $LOAD_PATH.include
 require_relative 'proto/fila/v1/service_services_pb'
 require_relative 'errors'
 require_relative 'consume_message'
-require_relative 'batch_enqueue_result'
+require_relative 'enqueue_result'
 require_relative 'batcher'
 
 module Fila
@@ -69,7 +69,7 @@ module Fila
       @batcher = nil
     end
 
-    # Enqueue a message to a queue.
+    # Enqueue a single message to a queue.
     #
     # When batching is enabled (default), the message is submitted to
     # the background batcher. At low load each message is sent
@@ -82,50 +82,50 @@ module Fila
     # @raise [QueueNotFoundError] if the queue does not exist
     # @raise [RPCError] for unexpected gRPC failures
     def enqueue(queue:, payload:, headers: nil)
-      req = ::Fila::V1::EnqueueRequest.new(
+      msg = ::Fila::V1::EnqueueMessage.new(
         queue: queue,
         headers: headers || {},
         payload: payload
       )
 
       if @batcher
-        @batcher.submit(req)
+        @batcher.submit(msg)
       else
-        enqueue_direct(req)
+        enqueue_single(msg)
       end
     end
 
-    # Enqueue a batch of messages in a single RPC call.
+    # Enqueue multiple messages in a single RPC call.
     #
     # Each message is independently validated and processed. A failed
     # message does not affect the others. Returns an array of
-    # BatchEnqueueResult with one result per input message, in order.
+    # EnqueueResult with one result per input message, in order.
     #
     # This bypasses the background batcher and always uses the
-    # BatchEnqueue RPC directly.
+    # Enqueue RPC directly.
     #
     # @param messages [Array<Hash>] messages to enqueue; each hash has
     #   keys :queue (String), :payload (String), and optionally
     #   :headers (Hash<String,String>)
-    # @return [Array<BatchEnqueueResult>]
+    # @return [Array<EnqueueResult>]
     # @raise [RPCError] for transport-level gRPC failures
-    def batch_enqueue(messages)
+    def enqueue_many(messages)
       proto_messages = messages.map do |m|
-        ::Fila::V1::EnqueueRequest.new(
+        ::Fila::V1::EnqueueMessage.new(
           queue: m[:queue],
           headers: m[:headers] || {},
           payload: m[:payload]
         )
       end
 
-      req = ::Fila::V1::BatchEnqueueRequest.new(messages: proto_messages)
-      resp = @stub.batch_enqueue(req, metadata: call_metadata)
+      req = ::Fila::V1::EnqueueRequest.new(messages: proto_messages)
+      resp = @stub.enqueue(req, metadata: call_metadata)
 
       resp.results.map do |r|
-        if r.result == :success
-          BatchEnqueueResult.new(message_id: r.success.message_id)
+        if r.result == :message_id
+          EnqueueResult.new(message_id: r.message_id)
         else
-          BatchEnqueueResult.new(error: r.error)
+          EnqueueResult.new(error: r.error.message)
         end
       end
     rescue GRPC::BadStatus => e
@@ -133,8 +133,6 @@ module Fila
     end
 
     # Open a streaming consumer. Yields messages as they arrive.
-    # Transparently unpacks batched delivery (repeated messages field)
-    # with fallback to singular message field.
     # Returns an Enumerator if no block given.
     def consume(queue:, &block)
       return enum_for(:consume, queue: queue) unless block
@@ -149,11 +147,21 @@ module Fila
     # @raise [MessageNotFoundError] if the message does not exist
     # @raise [RPCError] for unexpected gRPC failures
     def ack(queue:, msg_id:)
-      req = ::Fila::V1::AckRequest.new(queue: queue, message_id: msg_id)
-      @stub.ack(req, metadata: call_metadata)
-      nil
-    rescue GRPC::NotFound => e
-      raise MessageNotFoundError, "ack: #{e.details}"
+      msg = ::Fila::V1::AckMessage.new(queue: queue, message_id: msg_id)
+      req = ::Fila::V1::AckRequest.new(messages: [msg])
+      resp = @stub.ack(req, metadata: call_metadata)
+
+      result = resp.results.first
+      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
+      return if result.result == :success
+
+      err = result.error
+      case err.code
+      when :ACK_ERROR_CODE_MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, "ack: #{err.message}"
+      else
+        raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "ack: #{err.message}")
+      end
     rescue GRPC::BadStatus => e
       raise RPCError.new(e.code, e.details)
     end
@@ -166,11 +174,21 @@ module Fila
     # @raise [MessageNotFoundError] if the message does not exist
     # @raise [RPCError] for unexpected gRPC failures
     def nack(queue:, msg_id:, error:)
-      req = ::Fila::V1::NackRequest.new(queue: queue, message_id: msg_id, error: error)
-      @stub.nack(req, metadata: call_metadata)
-      nil
-    rescue GRPC::NotFound => e
-      raise MessageNotFoundError, "nack: #{e.details}"
+      msg = ::Fila::V1::NackMessage.new(queue: queue, message_id: msg_id, error: error)
+      req = ::Fila::V1::NackRequest.new(messages: [msg])
+      resp = @stub.nack(req, metadata: call_metadata)
+
+      result = resp.results.first
+      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
+      return if result.result == :success
+
+      err = result.error
+      case err.code
+      when :NACK_ERROR_CODE_MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, "nack: #{err.message}"
+      else
+        raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "nack: #{err.message}")
+      end
     rescue GRPC::BadStatus => e
       raise RPCError.new(e.code, e.details)
     end
@@ -200,11 +218,25 @@ module Fila
       )
     end
 
-    def enqueue_direct(req)
+    # Send a single message via the unified Enqueue RPC.
+    def enqueue_single(msg)
+      req = ::Fila::V1::EnqueueRequest.new(messages: [msg])
       resp = @stub.enqueue(req, metadata: call_metadata)
-      resp.message_id
-    rescue GRPC::NotFound => e
-      raise QueueNotFoundError, "enqueue: #{e.details}"
+
+      result = resp.results.first
+      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
+
+      if result.result == :message_id
+        result.message_id
+      else
+        err = result.error
+        case err.code
+        when :ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND
+          raise QueueNotFoundError, "enqueue: #{err.message}"
+        else
+          raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "enqueue: #{err.message}")
+        end
+      end
     rescue GRPC::BadStatus => e
       raise RPCError.new(e.code, e.details)
     end
@@ -226,20 +258,10 @@ module Fila
       raise RPCError.new(e.code, e.details)
     end
 
-    # Unpack messages from a ConsumeResponse. Prefers the repeated
-    # messages field (batched delivery); falls back to singular message
-    # field for backward compatibility with older servers.
+    # Unpack messages from a ConsumeResponse.
     def yield_messages_from_response(resp, &block)
-      msgs = resp.messages
-      if msgs && !msgs.empty?
-        msgs.each do |msg|
-          next if msg.nil? || msg.id.empty?
-
-          block.call(build_consume_message(msg))
-        end
-      else
-        msg = resp.message
-        return if msg.nil? || msg.id.empty?
+      resp.messages.each do |msg|
+        next if msg.nil? || msg.id.empty?
 
         block.call(build_consume_message(msg))
       end

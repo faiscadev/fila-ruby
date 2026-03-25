@@ -17,7 +17,7 @@ module Fila
         self.service_name = 'fila.v1.FilaService'
 
         rpc :Enqueue, ::Fila::V1::EnqueueRequest, ::Fila::V1::EnqueueResponse
-        rpc :BatchEnqueue, ::Fila::V1::BatchEnqueueRequest, ::Fila::V1::BatchEnqueueResponse
+        rpc :StreamEnqueue, stream(::Fila::V1::StreamEnqueueRequest), stream(::Fila::V1::StreamEnqueueResponse)
         rpc :Consume, ::Fila::V1::ConsumeRequest, stream(::Fila::V1::ConsumeResponse)
         rpc :Ack, ::Fila::V1::AckRequest, ::Fila::V1::AckResponse
         rpc :Nack, ::Fila::V1::NackRequest, ::Fila::V1::NackResponse
