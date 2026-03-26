@@ -35,7 +35,7 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
     data_dir    = Dir.mktmpdir('fila-test-')
     config_path = File.join(data_dir, 'fila.toml')
 
-    toml = "[server]\nlisten_addr = \"#{addr}\"\n"
+    toml = "[fibp]\nlisten_addr = \"#{addr}\"\n"
 
     if tls_config
       toml += "\n[tls]\n"
