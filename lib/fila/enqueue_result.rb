@@ -22,11 +22,16 @@ module Fila
     # @return [String, nil] error description on failure
     attr_reader :error
 
+    # @return [Integer, nil] FIBP error code on failure (nil on success)
+    attr_reader :error_code
+
     # @param message_id [String, nil] message ID if successful
     # @param error [String, nil] error string if failed
-    def initialize(message_id: nil, error: nil)
+    # @param error_code [Integer, nil] FIBP error code if failed
+    def initialize(message_id: nil, error: nil, error_code: nil)
       @message_id = message_id
-      @error = error
+      @error      = error
+      @error_code = error_code
     end
 
     # @return [Boolean] true if the message was successfully enqueued

@@ -213,7 +213,7 @@ module Fila
       result  = results.first
       raise RPCError.new(0, 'no result from server') if result.nil?
 
-      raise QueueNotFoundError, "enqueue: #{result.error}" unless result.success?
+      raise_enqueue_error(result) unless result.success?
 
       result.message_id
     rescue Transport::ConnectionClosed => e
@@ -257,6 +257,15 @@ module Fila
       end
     ensure
       @transport.stop_consume(corr_id) if corr_id
+    end
+
+    def raise_enqueue_error(result)
+      case result.error_code
+      when Transport::ERR_QUEUE_NOT_FOUND
+        raise QueueNotFoundError, "enqueue: #{result.error}"
+      else
+        raise RPCError.new(result.error_code.to_i, "enqueue: #{result.error}")
+      end
     end
 
     def raise_ack_nack_error(result, operation)

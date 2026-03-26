@@ -153,7 +153,11 @@ module Fila
       return Fila::Error.new('no result from server') if result.nil?
       return result.message_id if result.success?
 
-      QueueNotFoundError.new("enqueue: #{result.error}")
+      if result.error_code == Transport::ERR_QUEUE_NOT_FOUND
+        QueueNotFoundError.new("enqueue: #{result.error}")
+      else
+        RPCError.new(result.error_code.to_i, "enqueue: #{result.error}")
+      end
     end
 
     def broadcast_error(items, err)

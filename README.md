@@ -91,7 +91,7 @@ client = Fila::Client.new("localhost:5555",
 ```ruby
 require "fila"
 
-# API key sent on every request.
+# API key sent once as an AUTH frame when the connection is established.
 client = Fila::Client.new("localhost:5555",
   api_key: "fila_your_api_key_here"
 )

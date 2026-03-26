@@ -67,8 +67,8 @@ module Fila
 
       @socket = connect_socket
       perform_handshake
-      send_auth if @api_key
       start_reader
+      send_auth if @api_key
     end
 
     # Send a request frame and block until the response arrives.

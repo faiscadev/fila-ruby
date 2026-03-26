@@ -44,11 +44,11 @@ module Fila
           pos += id_len
           results << EnqueueResult.new(message_id: msg_id)
         else
-          _err_code, pos = read_u16(payload, pos)
-          err_len, pos = read_u16(payload, pos)
+          err_code, pos = read_u16(payload, pos)
+          err_len, pos  = read_u16(payload, pos)
           err_msg = payload.byteslice(pos, err_len).force_encoding('UTF-8')
           pos += err_len
-          results << EnqueueResult.new(error: err_msg)
+          results << EnqueueResult.new(error: err_msg, error_code: err_code)
         end
       end
       results
@@ -70,10 +70,16 @@ module Fila
 
     # Decode a server-push consume message frame payload.
     #
+    # Frame payload: msg_count:u16BE | messages...
+    # Each message: msg_id_len:u16BE+msg_id | fk_len:u16BE+fk |
+    #   attempt_count:u32BE | queue_id_len:u16BE+queue_id |
+    #   header_count:u8 | headers | payload_len:u32BE | payload
+    #
     # @param payload [String] raw binary frame payload
-    # @return [ConsumeMessage, nil]
+    # @return [ConsumeMessage, nil] the first message in the frame
     def decode_consume_push(payload)
       pos = 0
+      _msg_count, pos     = read_u16(payload, pos)
       msg_id, pos         = read_str16(payload, pos)
       fairness_key, pos   = read_str16(payload, pos)
       attempt_count, pos  = read_u32(payload, pos)
