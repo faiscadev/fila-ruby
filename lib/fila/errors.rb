@@ -10,12 +10,12 @@ module Fila
   # Raised when the specified message does not exist.
   class MessageNotFoundError < Error; end
 
-  # Raised for unexpected gRPC failures, preserving status code and message.
+  # Raised for unexpected transport failures, preserving an error code and message.
   class RPCError < Error
-    # @return [Integer] gRPC status code
+    # @return [Integer] error code (FIBP error code or 0 for connection errors)
     attr_reader :code
 
-    # @param code [Integer] gRPC status code
+    # @param code [Integer] error code
     # @param message [String] error message
     def initialize(code, message)
       @code = code

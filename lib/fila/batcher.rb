@@ -2,7 +2,7 @@
 
 module Fila
   # Background batcher that collects enqueue messages and flushes them
-  # in batches via the unified Enqueue RPC. Supports auto (opportunistic)
+  # in batches via the FIBP transport. Supports auto (opportunistic)
   # and linger (timer-based) modes.
   #
   # @api private
@@ -10,21 +10,19 @@ module Fila
     # An item queued for batching, pairing a message with its result slot.
     BatchItem = Struct.new(:message, :result_queue, keyword_init: true)
 
-    # @param stub [Fila::V1::FilaService::Stub] gRPC stub
-    # @param metadata [Hash] call metadata (auth headers)
+    # @param transport [Fila::Transport] FIBP transport
     # @param mode [Symbol] :auto or :linger
     # @param max_batch_size [Integer] cap on batch size (auto mode)
     # @param batch_size [Integer] batch size threshold (linger mode)
     # @param linger_ms [Integer] linger time in ms (linger mode)
-    def initialize(stub:, metadata:, mode:, max_batch_size: 100, batch_size: 100, linger_ms: 10)
-      @stub = stub
-      @metadata = metadata
-      @mode = mode
+    def initialize(transport:, mode:, max_batch_size: 100, batch_size: 100, linger_ms: 10)
+      @transport     = transport
+      @mode          = mode
       @max_batch_size = mode == :auto ? max_batch_size : batch_size
-      @linger_ms = linger_ms
-      @queue = Queue.new
-      @stopped = false
-      @mutex = Mutex.new
+      @linger_ms     = linger_ms
+      @queue         = Queue.new
+      @stopped       = false
+      @mutex         = Mutex.new
 
       @thread = Thread.new { run_loop }
       @thread.abort_on_exception = true
@@ -33,10 +31,10 @@ module Fila
     # Submit a message for batched sending. Blocks until the batch
     # containing this message is flushed and the result is available.
     #
-    # @param message [Fila::V1::EnqueueMessage] the enqueue message
+    # @param message [Hash] enqueue message with :queue, :payload, :headers
     # @return [String] message ID on success
     # @raise [Fila::QueueNotFoundError] if the queue does not exist
-    # @raise [Fila::RPCError] for unexpected gRPC failures
+    # @raise [Fila::RPCError] for unexpected transport failures
     def submit(message)
       result_queue = Queue.new
       item = BatchItem.new(message: message, result_queue: result_queue)
@@ -47,10 +45,9 @@ module Fila
         @queue.push(item)
       end
 
-      # Block until the batcher flushes our batch and posts the result.
       outcome = result_queue.pop
       case outcome
-      when String then outcome
+      when String    then outcome
       when Exception then raise outcome
       else raise Fila::Error, "unexpected batcher result: #{outcome.inspect}"
       end
@@ -67,7 +64,7 @@ module Fila
 
     def run_loop
       case @mode
-      when :auto then run_auto_loop
+      when :auto   then run_auto_loop
       when :linger then run_linger_loop
       end
     end
@@ -116,9 +113,9 @@ module Fila
     def drain_nonblocking(batch)
       while batch.size < @max_batch_size
         begin
-          item = @queue.pop(true) # non_block = true
+          item = @queue.pop(true)
           if item == :shutdown
-            @queue.push(:shutdown) # re-enqueue so the loop sees it
+            @queue.push(:shutdown)
             break
           end
           batch << item
@@ -128,36 +125,39 @@ module Fila
       end
     end
 
-    # Flush a batch of items via the unified Enqueue RPC.
-    def flush_batch(items)
-      req = ::Fila::V1::EnqueueRequest.new(messages: items.map(&:message))
-      results = @stub.enqueue(req, metadata: @metadata).results
+    # Flush a batch of items via the FIBP transport.
+    # Groups items by queue to produce one frame per queue.
+    def flush_batch(items) # rubocop:disable Metrics/MethodLength
+      # Group by queue, preserving per-item result queues
+      groups = items.each_with_index.group_by { |item, _| item.message[:queue] }
 
-      items.each_with_index do |item, idx|
-        item.result_queue.push(result_to_outcome(results[idx]))
+      groups.each do |queue, indexed_items|
+        items_only  = indexed_items.map(&:first)
+        msgs        = items_only.map(&:message)
+        payload     = Codec.encode_enqueue(queue, msgs)
+        resp        = @transport.request(Transport::OP_ENQUEUE, payload)
+        results     = Codec.decode_enqueue_response(resp)
+
+        items_only.each_with_index do |item, i|
+          item.result_queue.push(result_to_outcome(results[i]))
+        end
       end
-    rescue GRPC::BadStatus => e
-      broadcast_error(items, RPCError.new(e.code, e.details))
+    rescue Transport::ConnectionClosed => e
+      broadcast_error(items, RPCError.new(0, "connection closed: #{e.message}"))
     rescue StandardError => e
       broadcast_error(items, Fila::Error.new(e.message))
     end
 
-    # Convert a single proto EnqueueResult into a String (message_id) or Exception.
+    # Convert an EnqueueResult into a String (message_id) or Exception.
     def result_to_outcome(result)
       return Fila::Error.new('no result from server') if result.nil?
-      return result.message_id if result.result == :message_id
+      return result.message_id if result.success?
 
-      err = result.error
-      case err.code
-      when :ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND
-        QueueNotFoundError.new("enqueue: #{err.message}")
-      else
-        RPCError.new(GRPC::Core::StatusCodes::INTERNAL, err.message)
-      end
+      QueueNotFoundError.new("enqueue: #{result.error}")
     end
 
     def broadcast_error(items, err)
-      items.each { |item| item.result_queue.push(err) }
+      items.each { |item| item.result_queue.push(err) rescue nil } # rubocop:disable Style/RescueModifier
     end
 
     def current_time_ms
@@ -173,7 +173,7 @@ module Fila
       rescue ThreadError
         raise if current_time_ms >= deadline
 
-        sleep(0.001) # 1ms polling interval
+        sleep(0.001)
       end
     end
   end
