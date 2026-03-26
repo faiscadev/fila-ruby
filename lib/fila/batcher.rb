@@ -127,7 +127,7 @@ module Fila
 
     # Flush a batch of items via the FIBP transport.
     # Groups items by queue to produce one frame per queue.
-    def flush_batch(items) # rubocop:disable Metrics/AbcSize
+    def flush_batch(items)
       # Group by queue, preserving per-item result queues
       groups = items.each_with_index.group_by { |item, _| item.message[:queue] }
 
@@ -145,7 +145,9 @@ module Fila
     rescue Transport::ConnectionClosed => e
       broadcast_error(items, RPCError.new(0, "connection closed: #{e.message}"))
     rescue StandardError => e
-      broadcast_error(items, Fila::Error.new(e.message))
+      # Re-broadcast the original exception so callers see the specific type
+      # (e.g. QueueNotFoundError, RPCError) rather than a generic Fila::Error.
+      broadcast_error(items, e)
     end
 
     # Convert an EnqueueResult into a String (message_id) or Exception.
