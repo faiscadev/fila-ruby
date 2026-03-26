@@ -3,7 +3,7 @@
 require 'test_helper'
 require 'openssl'
 
-return unless FILA_SERVER_AVAILABLE
+return unless FILA_SERVER_AVAILABLE && FILA_TLS_AVAILABLE
 
 # Helper to generate self-signed CA and server/client certificates for tests.
 module CertHelper

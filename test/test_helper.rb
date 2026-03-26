@@ -242,4 +242,41 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
 
     "\x0a".b + [name_b.bytesize].pack('C') + name_b
   end
+
+  # Probe whether the running server binary supports TLS.  Some bleeding-edge
+  # builds panic on TLS startup when the Rustls crypto provider is not
+  # installed.  Returns true if a TLS-configured server starts successfully.
+  def self.tls_supported?
+    return false unless FILA_SERVER_AVAILABLE
+
+    cert_dir = Dir.mktmpdir('fila-tls-probe-')
+    # Generate a minimal self-signed server cert for the probe.
+    key  = OpenSSL::PKey::RSA.new(2048)
+    cert = OpenSSL::X509::Certificate.new
+    cert.version    = 2
+    cert.serial     = 1
+    cert.subject    = OpenSSL::X509::Name.parse('/CN=fila-tls-probe')
+    cert.issuer     = cert.subject
+    cert.public_key = key.public_key
+    cert.not_before = Time.now - 60
+    cert.not_after  = Time.now + 3600
+    cert.sign(key, OpenSSL::Digest.new('SHA256'))
+
+    cert_path = File.join(cert_dir, 'server.crt')
+    key_path  = File.join(cert_dir, 'server.key')
+    File.write(cert_path, cert.to_pem)
+    File.write(key_path,  key.to_pem)
+
+    server = start(tls_config: { server_cert_path: cert_path, server_key_path: key_path })
+    stop(server)
+    true
+  rescue StandardError
+    false
+  ensure
+    FileUtils.rm_rf(cert_dir) if cert_dir
+  end
 end
+
+# Probe TLS support once at load time so each TLS test can guard itself with:
+#   skip 'TLS not supported by this server binary' unless FILA_TLS_AVAILABLE
+FILA_TLS_AVAILABLE = TestServerHelper.tls_supported?
