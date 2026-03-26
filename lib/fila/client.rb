@@ -251,7 +251,7 @@ module Fila
         when Transport::ConnectionClosed then break
         when Exception                   then raise frame
         when String
-          msg = Codec.decode_consume_push(frame)
+          msg = Codec.decode_consume_push(frame, queue_name: queue)
           block.call(msg) if msg
         end
       end

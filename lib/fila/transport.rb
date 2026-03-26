@@ -100,25 +100,43 @@ module Fila
     # Register a push queue for consume-stream server-push frames.
     # Returns corr_id used to issue the consume request.
     #
+    # The server sends two kinds of frames after a consume request:
+    #   1. An ACK frame (flags=0, corr_id=<request corr_id>, empty payload)
+    #      confirming the consume subscription was registered.
+    #   2. Push frames (FLAG_SERVER_PUSH set, corr_id=0) carrying messages.
+    #
+    # We use a one-shot queue for the ACK (to block until the subscription is
+    # confirmed) and register +push_q+ at corr_id=0 for ongoing push frames.
+    #
     # @param payload [String] consume request payload
     # @param push_q [Queue] messages pushed here as they arrive
     # @return [Integer] corr_id
     def start_consume(payload, push_q)
       corr_id = next_corr_id
+      ack_q   = Queue.new
 
       @mutex.synchronize do
         raise ConnectionClosed, 'connection is closed' if @closed
 
-        @pending[corr_id] = push_q
+        @pending[corr_id] = ack_q  # consume ACK routed here (one-shot)
+        @pending[0]       = push_q # server-push frames carry corr_id=0
       end
 
       write_frame(OP_CONSUME, corr_id, payload)
+
+      # Wait for the ACK so we know the subscription is active before returning.
+      outcome = ack_q.pop
+      raise outcome if outcome.is_a?(Exception)
+
       corr_id
     end
 
     # Remove the consume push queue and stop dispatching to it.
     def stop_consume(corr_id)
-      @mutex.synchronize { @pending.delete(corr_id) }
+      @mutex.synchronize do
+        @pending.delete(corr_id)
+        @pending.delete(0)
+      end
     end
 
     # Close the connection.
@@ -169,8 +187,8 @@ module Fila
     end
 
     def send_auth
-      key_bytes = @api_key.encode('UTF-8').b
-      payload = [key_bytes.bytesize].pack('n') + key_bytes
+      # The FIBP AUTH frame payload is the raw API key bytes — no length prefix.
+      payload = @api_key.encode('UTF-8').b
       request(OP_AUTH, payload)
     end
 
@@ -216,16 +234,28 @@ module Fila
       dest.push(result)
     end
 
+    # Parse an OP_ERROR frame payload.
+    #
+    # FIBP OP_ERROR frames carry a plain UTF-8 message (no numeric code
+    # prefix).  We map well-known error messages to typed Ruby exceptions so
+    # callers can rescue specific error classes.
     def parse_error_frame(payload)
-      err_code = payload.byteslice(0, 2).unpack1('n')
-      msg_len  = payload.byteslice(2, 2).unpack1('n')
-      msg      = payload.byteslice(4, msg_len).force_encoding('UTF-8')
-      case err_code
-      when ERR_QUEUE_NOT_FOUND   then QueueNotFoundError.new(msg)
-      when ERR_MESSAGE_NOT_FOUND then MessageNotFoundError.new(msg)
-      when ERR_UNAUTHENTICATED   then RPCError.new(ERR_UNAUTHENTICATED, msg)
-      else                            RPCError.new(err_code, msg)
+      msg = payload.force_encoding('UTF-8')
+
+      if msg.include?('authentication') || msg.include?('unauthenticated') ||
+         msg.include?('api key') || msg.include?('OP_AUTH')
+        return RPCError.new(ERR_UNAUTHENTICATED, msg)
       end
+
+      if msg.include?('queue not found') || msg.include?('queue does not exist')
+        return QueueNotFoundError.new(msg)
+      end
+
+      if msg.include?('message not found') || msg.include?('lease not found')
+        return MessageNotFoundError.new(msg)
+      end
+
+      RPCError.new(0, msg)
     end
 
     def write_frame(opcode, corr_id, payload)

@@ -10,13 +10,92 @@ module Fila
     module_function
 
     # -----------------------------------------------------------------------
+    # Low-level read/write primitives
+    #
+    # These are listed first so that module_function makes them available as
+    # both public module methods (Codec.read_u16 etc.) and private instance
+    # methods.  All higher-level encode/decode methods rely on them via
+    # implicit self, which only works when they are module functions too.
+    # -----------------------------------------------------------------------
+
+    # @param str [String]
+    # @return [String] binary fragment (len:u16BE | utf8-bytes)
+    def encode_str16(str)
+      bytes = str.encode('UTF-8').b
+      [bytes.bytesize].pack('n') + bytes
+    end
+
+    # @param buf [String] binary buffer
+    # @param pos [Integer] byte offset
+    # @return [Array(String, Integer)] decoded string and new offset
+    def read_str16(buf, pos)
+      len, pos = read_u16(buf, pos)
+      [buf.byteslice(pos, len).force_encoding('UTF-8'), pos + len]
+    end
+
+    # @param buf [String] binary buffer
+    # @param pos [Integer] byte offset
+    # @return [Array(Hash, Integer)] decoded headers hash and new offset
+    def read_headers(buf, pos)
+      count, pos = read_u8(buf, pos)
+      headers = {}
+      count.times do
+        key, pos = read_str16(buf, pos)
+        val, pos = read_str16(buf, pos)
+        headers[key] = val
+      end
+      [headers, pos]
+    end
+
+    # @param buf [String] binary buffer
+    # @param pos [Integer] byte offset
+    # @return [Array(Integer, Integer)] decoded u8 value and new offset
+    def read_u8(buf, pos)
+      [buf.getbyte(pos), pos + 1]
+    end
+
+    # @param buf [String] binary buffer
+    # @param pos [Integer] byte offset
+    # @return [Array(Integer, Integer)] decoded big-endian u16 value and new offset
+    def read_u16(buf, pos)
+      [buf.byteslice(pos, 2).unpack1('n'), pos + 2]
+    end
+
+    # @param buf [String] binary buffer
+    # @param pos [Integer] byte offset
+    # @return [Array(Integer, Integer)] decoded big-endian u32 value and new offset
+    def read_u32(buf, pos)
+      [buf.byteslice(pos, 4).unpack1('N'), pos + 4]
+    end
+
+    # -----------------------------------------------------------------------
+    # Single-message encoder
+    #
+    # Wire format: header_count:u8 |
+    #              headers: (key_len:u16BE+key, val_len:u16BE+val)* |
+    #              payload_len:u32BE | payload
+    # -----------------------------------------------------------------------
+
+    # @param msg [Hash] with :payload and optional :headers
+    # @return [String] binary fragment
+    def encode_message(msg)
+      headers = msg[:headers] || {}
+      buf = [headers.size].pack('C')
+      headers.each do |key, val|
+        buf += encode_str16(key.to_s)
+        buf += encode_str16(val.to_s)
+      end
+      payload_b = (msg[:payload] || '').b
+      buf += [payload_b.bytesize].pack('N') + payload_b
+      buf
+    end
+
+    # -----------------------------------------------------------------------
     # Enqueue request
     #
     # queue_len:u16BE | queue:utf8
     # msg_count:u16BE
-    # messages... (each: header_count:u8 |
-    #               headers: (key_len:u16BE+key, val_len:u16BE+val)* |
-    #               payload_len:u32BE | payload)
+    # messages... (each encoded by encode_message)
     # -----------------------------------------------------------------------
 
     # @param queue [String]
@@ -72,21 +151,25 @@ module Fila
     #
     # Frame payload: msg_count:u16BE | messages...
     # Each message: msg_id_len:u16BE+msg_id | fk_len:u16BE+fk |
-    #   attempt_count:u32BE | queue_id_len:u16BE+queue_id |
-    #   header_count:u8 | headers | payload_len:u32BE | payload
+    #   attempt_count:u32BE |
+    #   header_count:u8 | headers: (key_len:u16BE+key, val_len:u16BE+val)* |
+    #   payload_len:u32BE | payload
+    #
+    # Note: the queue name is NOT included in the wire frame; it is passed in
+    # by the caller (from the original consume request) via +queue_name+.
     #
     # @param payload [String] raw binary frame payload
+    # @param queue_name [String] name of the queue being consumed
     # @return [ConsumeMessage, nil] the first message in the frame
-    def decode_consume_push(payload)
+    def decode_consume_push(payload, queue_name: '')
       pos = 0
-      _msg_count, pos     = read_u16(payload, pos)
-      msg_id, pos         = read_str16(payload, pos)
-      fairness_key, pos   = read_str16(payload, pos)
-      attempt_count, pos  = read_u32(payload, pos)
-      queue_id, pos       = read_str16(payload, pos)
-      headers, pos        = read_headers(payload, pos)
-      pay_len, pos        = read_u32(payload, pos)
-      body                = payload.byteslice(pos, pay_len)
+      _msg_count, pos    = read_u16(payload, pos)
+      msg_id, pos        = read_str16(payload, pos)
+      fairness_key, pos  = read_str16(payload, pos)
+      attempt_count, pos = read_u32(payload, pos)
+      headers, pos       = read_headers(payload, pos)
+      pay_len, pos       = read_u32(payload, pos)
+      body               = payload.byteslice(pos, pay_len)
 
       ConsumeMessage.new(
         id: msg_id,
@@ -94,7 +177,7 @@ module Fila
         payload: body,
         fairness_key: fairness_key,
         attempt_count: attempt_count,
-        queue: queue_id
+        queue: queue_name
       )
     end
 
@@ -159,53 +242,11 @@ module Fila
     end
 
     # Decode a nack response (same shape as ack response).
-    alias decode_nack_response decode_ack_response
-
-    private
-
-    def encode_message(msg)
-      headers = msg[:headers] || {}
-      buf = [headers.size].pack('C')
-      headers.each do |key, val|
-        buf += encode_str16(key.to_s)
-        buf += encode_str16(val.to_s)
-      end
-      payload_b = (msg[:payload] || '').b
-      buf += [payload_b.bytesize].pack('N') + payload_b
-      buf
-    end
-
-    def encode_str16(str)
-      bytes = str.encode('UTF-8').b
-      [bytes.bytesize].pack('n') + bytes
-    end
-
-    def read_str16(buf, pos)
-      len, pos = read_u16(buf, pos)
-      [buf.byteslice(pos, len).force_encoding('UTF-8'), pos + len]
-    end
-
-    def read_headers(buf, pos)
-      count, pos = read_u8(buf, pos)
-      headers = {}
-      count.times do
-        key, pos = read_str16(buf, pos)
-        val, pos = read_str16(buf, pos)
-        headers[key] = val
-      end
-      [headers, pos]
-    end
-
-    def read_u8(buf, pos)
-      [buf.getbyte(pos), pos + 1]
-    end
-
-    def read_u16(buf, pos)
-      [buf.byteslice(pos, 2).unpack1('n'), pos + 2]
-    end
-
-    def read_u32(buf, pos)
-      [buf.byteslice(pos, 4).unpack1('N'), pos + 4]
+    #
+    # module_function does not propagate to aliases, so we define this
+    # explicitly to ensure it is callable as Codec.decode_nack_response.
+    def decode_nack_response(payload)
+      decode_ack_response(payload)
     end
   end
 end
