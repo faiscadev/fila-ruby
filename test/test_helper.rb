@@ -3,19 +3,17 @@
 require 'minitest/autorun'
 require 'tmpdir'
 require 'socket'
-require 'grpc'
+require 'openssl'
 
 $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
-$LOAD_PATH.unshift File.expand_path('../lib/fila/proto', __dir__)
 require 'fila'
-require_relative '../lib/fila/proto/fila/v1/admin_services_pb'
 
 FILA_SERVER_BIN = ENV.fetch('FILA_SERVER_BIN') do
   File.join(__dir__, '..', '..', 'fila', 'target', 'release', 'fila-server')
 end
 FILA_SERVER_AVAILABLE = File.exist?(FILA_SERVER_BIN)
 
-module TestServerHelper
+module TestServerHelper # rubocop:disable Metrics/ModuleLength
   def self.find_free_port
     server = TCPServer.new('127.0.0.1', 0)
     port = server.addr[1]
@@ -28,12 +26,13 @@ module TestServerHelper
   # @param tls_config [Hash, nil] optional TLS configuration with keys:
   #   :ca_cert_path, :server_cert_path, :server_key_path
   # @param bootstrap_apikey [String, nil] optional bootstrap API key
-  # @return [Hash] server info with :addr, :pid, :data_dir, :admin_stub
+  # @return [Hash] server info with :addr, :host, :port, :pid, :data_dir
+  #   and optional :tls_config, :bootstrap_apikey
   def self.start(tls_config: nil, bootstrap_apikey: nil)
     port = find_free_port
     addr = "127.0.0.1:#{port}"
 
-    data_dir = Dir.mktmpdir('fila-test-')
+    data_dir    = Dir.mktmpdir('fila-test-')
     config_path = File.join(data_dir, 'fila.toml')
 
     toml = "[server]\nlisten_addr = \"#{addr}\"\n"
@@ -62,56 +61,48 @@ module TestServerHelper
       )
     end
 
-    # Build credentials for admin stub.
-    # client_ca_cert_path is always needed to verify server cert; ca_cert_path is only for mTLS.
-    credentials = :this_channel_is_insecure
-    if tls_config
-      ca_path = tls_config[:client_ca_cert_path] || tls_config[:ca_cert_path]
-      if ca_path
-        ca_cert = File.read(ca_path)
-        client_key = tls_config[:client_key_path] ? File.read(tls_config[:client_key_path]) : nil
-        client_cert = tls_config[:client_cert_path] ? File.read(tls_config[:client_cert_path]) : nil
-        credentials = GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
-      end
-    end
+    server_info = {
+      addr: addr,
+      host: '127.0.0.1',
+      port: port,
+      pid: pid,
+      data_dir: data_dir,
+      tls_config: tls_config,
+      bootstrap_apikey: bootstrap_apikey
+    }
 
-    admin_metadata = {}
-    admin_metadata['authorization'] = "Bearer #{bootstrap_apikey}" if bootstrap_apikey
+    wait_for_ready(server_info, stderr_path, toml)
+    server_info
+  end
 
-    # Wait for server ready.
+  def self.wait_for_ready(server_info, stderr_path, toml)
     deadline = Time.now + 10
     ready = false
     while Time.now < deadline
       begin
-        try_list_queues(addr, credentials: credentials, metadata: admin_metadata)
+        # Use a plain TCP connect to check the port is accepting connections.
+        # A full FIBP handshake would fail against a non-FIBP server (e.g. old
+        # gRPC binary), masking real startup failures.
+        sock = TCPSocket.new(server_info[:host], server_info[:port])
+        sock.close
         ready = true
         break
-      rescue StandardError
+      rescue SystemCallError
         sleep 0.05
       end
     end
 
-    unless ready
-      Process.kill('TERM', pid)
-      Process.wait(pid)
-      stderr_output = begin
-        File.read(stderr_path)
-      rescue StandardError
-        ''
-      end
-      FileUtils.rm_rf(data_dir)
-      raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
+    return if ready
+
+    Process.kill('TERM', server_info[:pid])
+    Process.wait(server_info[:pid])
+    stderr_output = begin
+      File.read(stderr_path)
+    rescue StandardError
+      ''
     end
-
-    admin_stub = ::Fila::V1::FilaAdmin::Stub.new(addr, credentials)
-
-    {
-      addr: addr,
-      pid: pid,
-      data_dir: data_dir,
-      admin_stub: admin_stub,
-      admin_metadata: admin_metadata
-    }
+    FileUtils.rm_rf(server_info[:data_dir])
+    raise "fila-server failed to start within 10s on #{server_info[:addr]}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
   end
 
   def self.stop(server)
@@ -122,13 +113,41 @@ module TestServerHelper
     # Process already gone.
   end
 
-  def self.create_queue(server, name)
-    req = ::Fila::V1::CreateQueueRequest.new(name: name, config: {})
-    server[:admin_stub].create_queue(req, metadata: server[:admin_metadata] || {})
+  # Build a FIBP transport with appropriate TLS/auth for admin operations.
+  def self.admin_transport(server)
+    tc = server[:tls_config]
+    tls_opts = if tc
+                 ca_path = tc[:client_ca_cert_path] || tc[:ca_cert_path]
+                 {
+                   tls: true,
+                   ca_cert: ca_path ? File.read(ca_path) : nil,
+                   client_cert: tc[:client_cert_path] ? File.read(tc[:client_cert_path]) : nil,
+                   client_key: tc[:client_key_path] ? File.read(tc[:client_key_path]) : nil
+                 }
+               else
+                 { tls: false }
+               end
+
+    Fila::Transport.new(
+      host: server[:host],
+      port: server[:port],
+      api_key: server[:bootstrap_apikey],
+      **tls_opts
+    )
   end
 
-  def self.try_list_queues(addr, credentials: :this_channel_is_insecure, metadata: {})
-    stub = ::Fila::V1::FilaAdmin::Stub.new(addr, credentials)
-    stub.list_queues(::Fila::V1::ListQueuesRequest.new, metadata: metadata)
+  # Send a CreateQueue admin frame via FIBP.
+  OP_CREATE_QUEUE = 0x10
+
+  def self.create_queue(server, name)
+    transport = admin_transport(server)
+    name_b    = name.encode('UTF-8').b
+    payload   = [name_b.bytesize].pack('n') + name_b +
+                [0].pack('n') # config_count: 0 key-value pairs
+    transport.request(OP_CREATE_QUEUE, payload)
+  rescue StandardError => e
+    raise "create_queue #{name.inspect} failed: #{e.message}"
+  ensure
+    transport&.close
   end
 end

@@ -79,6 +79,7 @@ class TestApiKeyAuth < Minitest::Test
   end
 
   def teardown
+    @client&.close
     TestServerHelper.stop(@server) if @server
   end
 
@@ -94,11 +95,13 @@ class TestApiKeyAuth < Minitest::Test
     client_no_key = Fila::Client.new(@server[:addr])
     TestServerHelper.create_queue(@server, 'auth-reject-queue')
 
-    # Without API key, the server should reject the request with Unauthenticated.
+    # Without API key, the server should reject with Unauthenticated.
     err = assert_raises(Fila::RPCError) do
       client_no_key.enqueue(queue: 'auth-reject-queue', payload: 'should fail')
     end
-    assert_equal 16, err.code # GRPC::Core::StatusCodes::UNAUTHENTICATED
+    assert_equal Fila::Transport::ERR_UNAUTHENTICATED, err.code
+  ensure
+    client_no_key&.close
   end
 
   def test_consume_with_api_key
@@ -138,6 +141,7 @@ class TestTlsConnection < Minitest::Test
   end
 
   def teardown
+    @client&.close
     TestServerHelper.stop(@server) if @server
     FileUtils.rm_rf(@cert_dir) if @cert_dir
   end
@@ -189,6 +193,7 @@ class TestMtlsConnection < Minitest::Test
   end
 
   def teardown
+    @client&.close
     TestServerHelper.stop(@server) if @server
     FileUtils.rm_rf(@cert_dir) if @cert_dir
   end
@@ -208,8 +213,6 @@ class TestTlsWithApiKey < Minitest::Test
     @certs = CertHelper.generate_certs(@cert_dir)
     @bootstrap_key = 'tls-bootstrap-key-67890'
 
-    # Server-only TLS + API key: omit ca_cert_path so server does not require client certs.
-    # client_ca_cert_path is used by the test client to verify the server cert.
     @server = TestServerHelper.start(
       tls_config: {
         server_cert_path: @certs[:server_cert],
@@ -227,6 +230,7 @@ class TestTlsWithApiKey < Minitest::Test
   end
 
   def teardown
+    @client&.close
     TestServerHelper.stop(@server) if @server
     FileUtils.rm_rf(@cert_dir) if @cert_dir
   end
@@ -249,7 +253,9 @@ class TestTlsWithApiKey < Minitest::Test
     err = assert_raises(Fila::RPCError) do
       client_no_key.enqueue(queue: 'tls-auth-reject-queue', payload: 'should fail')
     end
-    assert_equal 16, err.code # UNAUTHENTICATED
+    assert_equal Fila::Transport::ERR_UNAUTHENTICATED, err.code
+  ensure
+    client_no_key&.close
   end
 end
 
@@ -260,6 +266,7 @@ class TestBackwardCompatibility < Minitest::Test
   end
 
   def teardown
+    @client&.close
     TestServerHelper.stop(@server) if @server
   end
 

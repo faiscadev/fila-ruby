@@ -2,6 +2,8 @@
 
 Ruby client SDK for the [Fila](https://github.com/faisca/fila) message broker.
 
+Uses the FIBP (Fila Binary Protocol) transport — a lightweight length-prefixed binary protocol over raw TCP. No gRPC or protobuf dependencies required.
+
 ## Installation
 
 ```bash
@@ -89,7 +91,7 @@ client = Fila::Client.new("localhost:5555",
 ```ruby
 require "fila"
 
-# API key sent as Bearer token on every request.
+# API key sent once as an AUTH frame when the connection is established.
 client = Fila::Client.new("localhost:5555",
   api_key: "fila_your_api_key_here"
 )
@@ -122,7 +124,7 @@ Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
 | `ca_cert:` | `String` or `nil` | PEM-encoded CA certificate for TLS (implies `tls: true`) |
 | `client_cert:` | `String` or `nil` | PEM-encoded client certificate for mTLS |
 | `client_key:` | `String` or `nil` | PEM-encoded client private key for mTLS |
-| `api_key:` | `String` or `nil` | API key for Bearer token authentication |
+| `api_key:` | `String` or `nil` | API key for authentication |
 
 When no TLS/auth options are provided, the client connects over plaintext (backward compatible). When `tls: true` is set without `ca_cert:`, the OS system trust store is used for server certificate verification.
 
@@ -144,7 +146,7 @@ Negatively acknowledge a failed message. The message is requeued or routed to th
 
 ### `client.close`
 
-Close the underlying gRPC channel.
+Drain any pending batched messages, then close the underlying TCP connection.
 
 ## Error Handling
 
@@ -163,6 +165,10 @@ rescue Fila::MessageNotFoundError => e
   # handle message not found
 end
 ```
+
+## Transport
+
+This SDK uses **FIBP** (Fila Binary Protocol): a length-prefixed binary protocol over raw TCP (or TLS). It has no runtime dependencies beyond Ruby's standard library (`socket`, `openssl`, `thread`).
 
 ## License
 

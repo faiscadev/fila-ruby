@@ -1,20 +1,14 @@
 # frozen_string_literal: true
 
-require 'grpc'
-
-# Add proto directory to load path so generated requires resolve correctly.
-$LOAD_PATH.unshift(File.expand_path('proto', __dir__)) unless $LOAD_PATH.include?(File.expand_path('proto', __dir__))
-
-require_relative 'proto/fila/v1/service_services_pb'
 require_relative 'errors'
 require_relative 'consume_message'
 require_relative 'enqueue_result'
 require_relative 'batcher'
+require_relative 'transport'
+require_relative 'codec'
 
 module Fila
-  # Client for the Fila message broker.
-  #
-  # Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
+  # Client for the Fila message broker over the FIBP (Fila Binary Protocol).
   #
   # @example Plain-text, default auto-batching
   #   client = Fila::Client.new("localhost:5555")
@@ -57,9 +51,15 @@ module Fila
       batch_size: 100, linger_ms: 10
     )
       validate_batch_mode(batch_mode)
-      @api_key = api_key
-      @credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
-      @stub = ::Fila::V1::FilaService::Stub.new(addr, @credentials)
+      validate_tls_options(tls || ca_cert, client_cert, client_key)
+
+      host, port = parse_addr(addr)
+      @transport = Transport.new(
+        host: host, port: port,
+        tls: tls, ca_cert: ca_cert,
+        client_cert: client_cert, client_key: client_key,
+        api_key: api_key
+      )
       @batcher = start_batcher(batch_mode, max_batch_size, batch_size, linger_ms)
     end
 
@@ -67,6 +67,8 @@ module Fila
     def close
       @batcher&.close
       @batcher = nil
+      @transport&.close
+      @transport = nil
     end
 
     # Enqueue a single message to a queue.
@@ -80,13 +82,9 @@ module Fila
     # @param headers [Hash<String,String>, nil] optional headers
     # @return [String] broker-assigned message ID
     # @raise [QueueNotFoundError] if the queue does not exist
-    # @raise [RPCError] for unexpected gRPC failures
+    # @raise [RPCError] for unexpected transport failures
     def enqueue(queue:, payload:, headers: nil)
-      msg = ::Fila::V1::EnqueueMessage.new(
-        queue: queue,
-        headers: headers || {},
-        payload: payload
-      )
+      msg = { queue: queue, payload: payload, headers: headers || {} }
 
       if @batcher
         @batcher.submit(msg)
@@ -108,36 +106,29 @@ module Fila
     #   keys :queue (String), :payload (String), and optionally
     #   :headers (Hash<String,String>)
     # @return [Array<EnqueueResult>]
-    # @raise [RPCError] for transport-level gRPC failures
+    # @raise [RPCError] for transport-level failures
     def enqueue_many(messages)
-      proto_messages = messages.map do |m|
-        ::Fila::V1::EnqueueMessage.new(
-          queue: m[:queue],
-          headers: m[:headers] || {},
-          payload: m[:payload]
-        )
-      end
+      return [] if messages.empty?
 
-      req = ::Fila::V1::EnqueueRequest.new(messages: proto_messages)
-      resp = @stub.enqueue(req, metadata: call_metadata)
-
-      resp.results.map do |r|
-        if r.result == :message_id
-          EnqueueResult.new(message_id: r.message_id)
-        else
-          EnqueueResult.new(error: r.error.message)
-        end
-      end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
+      # Group messages by queue for the wire format (all in one frame,
+      # queue name is per-message in FIBP).
+      # The protocol supports a single queue per frame, so we use the
+      # queue of the first message and encode the rest individually by
+      # sending as a batch under each unique queue.
+      enqueue_many_raw(messages)
+    rescue Transport::ConnectionClosed => e
+      raise RPCError.new(0, "connection closed: #{e.message}")
     end
 
     # Open a streaming consumer. Yields messages as they arrive.
     # Returns an Enumerator if no block given.
+    #
+    # @param queue [String] queue to consume
+    # @yield [ConsumeMessage]
     def consume(queue:, &block)
       return enum_for(:consume, queue: queue) unless block
 
-      consume_with_redirect(queue: queue, redirected: false, &block)
+      consume_stream(queue, &block)
     end
 
     # Acknowledge a successfully processed message.
@@ -145,25 +136,19 @@ module Fila
     # @param queue [String] queue the message belongs to
     # @param msg_id [String] ID of the message to acknowledge
     # @raise [MessageNotFoundError] if the message does not exist
-    # @raise [RPCError] for unexpected gRPC failures
+    # @raise [RPCError] for unexpected transport failures
     def ack(queue:, msg_id:)
-      msg = ::Fila::V1::AckMessage.new(queue: queue, message_id: msg_id)
-      req = ::Fila::V1::AckRequest.new(messages: [msg])
-      resp = @stub.ack(req, metadata: call_metadata)
+      payload = Codec.encode_ack([{ queue: queue, msg_id: msg_id }])
+      resp    = @transport.request(Transport::OP_ACK, payload)
+      results = Codec.decode_ack_response(resp)
 
-      result = resp.results.first
-      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
-      return if result.result == :success
+      result = results.first
+      raise RPCError.new(0, 'no result from server') if result.nil?
+      return if result[:ok]
 
-      err = result.error
-      case err.code
-      when :ACK_ERROR_CODE_MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "ack: #{err.message}"
-      else
-        raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "ack: #{err.message}")
-      end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
+      raise_ack_nack_error(result, 'ack')
+    rescue Transport::ConnectionClosed => e
+      raise RPCError.new(0, "connection closed: #{e.message}")
     end
 
     # Negatively acknowledge a message that failed processing.
@@ -172,113 +157,36 @@ module Fila
     # @param msg_id [String] ID of the message to nack
     # @param error [String] description of the failure
     # @raise [MessageNotFoundError] if the message does not exist
-    # @raise [RPCError] for unexpected gRPC failures
+    # @raise [RPCError] for unexpected transport failures
     def nack(queue:, msg_id:, error:)
-      msg = ::Fila::V1::NackMessage.new(queue: queue, message_id: msg_id, error: error)
-      req = ::Fila::V1::NackRequest.new(messages: [msg])
-      resp = @stub.nack(req, metadata: call_metadata)
+      payload = Codec.encode_nack([{ queue: queue, msg_id: msg_id, error: error }])
+      resp    = @transport.request(Transport::OP_NACK, payload)
+      results = Codec.decode_nack_response(resp)
 
-      result = resp.results.first
-      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
-      return if result.result == :success
+      result = results.first
+      raise RPCError.new(0, 'no result from server') if result.nil?
+      return if result[:ok]
 
-      err = result.error
-      case err.code
-      when :NACK_ERROR_CODE_MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "nack: #{err.message}"
-      else
-        raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "nack: #{err.message}")
-      end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
+      raise_ack_nack_error(result, 'nack')
+    rescue Transport::ConnectionClosed => e
+      raise RPCError.new(0, "connection closed: #{e.message}")
     end
 
-    LEADER_ADDR_KEY = 'x-fila-leader-addr'
-
-    private_constant :LEADER_ADDR_KEY
-
     private
+
+    def parse_addr(addr)
+      # Support "host:port" and IPv6 "[::1]:5555"
+      pattern = addr.start_with?('[') ? /\A\[(.+)\]:(\d+)\z/ : /\A(.+):(\d+)\z/
+      m = addr.match(pattern)
+      raise ArgumentError, "invalid address #{addr.inspect}, expected host:port" unless m
+
+      [m[1], m[2].to_i]
+    end
 
     def validate_batch_mode(mode)
       return if BATCH_MODES.include?(mode)
 
       raise ArgumentError, "invalid batch_mode: #{mode.inspect}, must be one of #{BATCH_MODES.inspect}"
-    end
-
-    def start_batcher(mode, max_batch_size, batch_size, linger_ms)
-      return nil if mode == :disabled
-
-      Batcher.new(
-        stub: @stub,
-        metadata: call_metadata,
-        mode: mode,
-        max_batch_size: max_batch_size,
-        batch_size: batch_size,
-        linger_ms: linger_ms
-      )
-    end
-
-    # Send a single message via the unified Enqueue RPC.
-    def enqueue_single(msg)
-      req = ::Fila::V1::EnqueueRequest.new(messages: [msg])
-      resp = @stub.enqueue(req, metadata: call_metadata)
-
-      result = resp.results.first
-      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
-
-      if result.result == :message_id
-        result.message_id
-      else
-        err = result.error
-        case err.code
-        when :ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND
-          raise QueueNotFoundError, "enqueue: #{err.message}"
-        else
-          raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "enqueue: #{err.message}")
-        end
-      end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
-    end
-
-    def consume_with_redirect(queue:, redirected:, &block)
-      stream = @stub.consume(::Fila::V1::ConsumeRequest.new(queue: queue), metadata: call_metadata)
-      stream.each do |resp|
-        yield_messages_from_response(resp, &block)
-      end
-    rescue GRPC::Cancelled then nil
-    rescue GRPC::NotFound => e
-      raise QueueNotFoundError, "consume: #{e.details}"
-    rescue GRPC::Unavailable => e
-      raise RPCError.new(e.code, e.details) if (leader_addr = extract_leader_addr(e)).nil? || redirected
-
-      @stub = ::Fila::V1::FilaService::Stub.new(leader_addr, @credentials)
-      consume_with_redirect(queue: queue, redirected: true, &block)
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
-    end
-
-    # Unpack messages from a ConsumeResponse.
-    def yield_messages_from_response(resp, &block)
-      resp.messages.each do |msg|
-        next if msg.nil? || msg.id.empty?
-
-        block.call(build_consume_message(msg))
-      end
-    end
-
-    def extract_leader_addr(err)
-      err.metadata[LEADER_ADDR_KEY]
-    rescue StandardError
-      nil
-    end
-
-    def build_credentials(tls:, ca_cert:, client_cert:, client_key:)
-      tls_enabled = tls || ca_cert
-      validate_tls_options(tls_enabled, client_cert, client_key)
-      return :this_channel_is_insecure unless tls_enabled
-
-      build_channel_credentials(ca_cert, client_cert, client_key)
     end
 
     def validate_tls_options(tls_enabled, client_cert, client_key)
@@ -287,29 +195,86 @@ module Fila
       raise ArgumentError, 'tls: true or ca_cert is required when client_cert or client_key is provided'
     end
 
-    def build_channel_credentials(ca_cert, client_cert, client_key)
-      if ca_cert then GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
-      elsif client_cert && client_key then GRPC::Core::ChannelCredentials.new(nil, client_key, client_cert)
-      else GRPC::Core::ChannelCredentials.new
+    def start_batcher(mode, max_batch_size, batch_size, linger_ms)
+      return nil if mode == :disabled
+
+      Batcher.new(
+        transport: @transport,
+        mode: mode,
+        max_batch_size: max_batch_size,
+        batch_size: batch_size,
+        linger_ms: linger_ms
+      )
+    end
+
+    # Send a single message as a batch of one.
+    def enqueue_single(msg)
+      results = enqueue_many_raw([msg])
+      result  = results.first
+      raise RPCError.new(0, 'no result from server') if result.nil?
+
+      raise_enqueue_error(result) unless result.success?
+
+      result.message_id
+    rescue Transport::ConnectionClosed => e
+      raise RPCError.new(0, "connection closed: #{e.message}")
+    end
+
+    # Raw multi-message enqueue — groups by queue, sends one frame per queue.
+    def enqueue_many_raw(messages)
+      # Group by queue to produce per-queue frames
+      groups = messages.each_with_index.group_by { |m, _| m[:queue] }
+      # Collect results in original order
+      all_results = Array.new(messages.size)
+
+      groups.each do |queue, indexed_msgs|
+        msgs_only  = indexed_msgs.map(&:first)
+        indices    = indexed_msgs.map(&:last)
+        payload    = Codec.encode_enqueue(queue, msgs_only)
+        resp       = @transport.request(Transport::OP_ENQUEUE, payload)
+        results    = Codec.decode_enqueue_response(resp)
+
+        indices.each_with_index { |orig_idx, i| all_results[orig_idx] = results[i] }
+      end
+
+      all_results
+    end
+
+    def consume_stream(queue, &block)
+      push_q   = Queue.new
+      payload  = Codec.encode_consume(queue)
+      corr_id  = @transport.start_consume(payload, push_q)
+
+      loop do
+        frame = push_q.pop
+        case frame
+        when Transport::ConnectionClosed then break
+        when Exception                   then raise frame
+        when String
+          msg = Codec.decode_consume_push(frame)
+          block.call(msg) if msg
+        end
+      end
+    ensure
+      @transport.stop_consume(corr_id) if corr_id
+    end
+
+    def raise_enqueue_error(result)
+      case result.error_code
+      when Transport::ERR_QUEUE_NOT_FOUND
+        raise QueueNotFoundError, "enqueue: #{result.error}"
+      else
+        raise RPCError.new(result.error_code.to_i, "enqueue: #{result.error}")
       end
     end
 
-    def call_metadata
-      return {} unless @api_key
-
-      { 'authorization' => "Bearer #{@api_key}" }
-    end
-
-    def build_consume_message(msg)
-      metadata = msg.metadata
-      ConsumeMessage.new(
-        id: msg.id,
-        headers: msg.headers.to_h,
-        payload: msg.payload,
-        fairness_key: metadata&.fairness_key.to_s,
-        attempt_count: metadata&.attempt_count.to_i,
-        queue: metadata&.queue_id.to_s
-      )
+    def raise_ack_nack_error(result, operation)
+      case result[:err_code]
+      when Transport::ERR_MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, "#{operation}: #{result[:err_msg]}"
+      else
+        raise RPCError.new(result[:err_code], "#{operation}: #{result[:err_msg]}")
+      end
     end
   end
 end
