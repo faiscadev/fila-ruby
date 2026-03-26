@@ -42,7 +42,7 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
   # Attempt to start a fila-server instance once. Returns the server info
   # hash on success, or nil if the port was already in use (retry-able).
   # Raises on any other failure.
-  def self.try_start(tls_config: nil, bootstrap_apikey: nil) # rubocop:disable Metrics/MethodLength
+  def self.try_start(tls_config: nil, bootstrap_apikey: nil)
     port = find_free_port
     addr = "127.0.0.1:#{port}"
 
@@ -144,7 +144,7 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
   # the caller to reconnect (which can leave half-open connections).
   PROBE_TIMEOUT_S = 0.5
 
-  def self.probe_fibp(host, port, tls_config) # rubocop:disable Metrics/MethodLength
+  def self.probe_fibp(host, port, tls_config)
     tcp = TCPSocket.new(host, port)
     tcp.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
     sock = tcp
@@ -171,8 +171,7 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
     sock.write(FIBP_HANDSHAKE)
 
     # Wait up to PROBE_TIMEOUT_S for the server to echo back the handshake.
-    ready = IO.select([sock], nil, nil, PROBE_TIMEOUT_S)
-    return false unless ready
+    return false unless sock.wait_readable(PROBE_TIMEOUT_S)
 
     echo = sock.read(6)
     echo == FIBP_HANDSHAKE

@@ -127,7 +127,7 @@ module Fila
 
     # Flush a batch of items via the FIBP transport.
     # Groups items by queue to produce one frame per queue.
-    def flush_batch(items) # rubocop:disable Metrics/AbcSize
+    def flush_batch(items)
       # Group by queue, preserving per-item result queues
       groups = items.each_with_index.group_by { |item, _| item.message[:queue] }
 

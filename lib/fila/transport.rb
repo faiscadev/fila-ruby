@@ -241,21 +241,29 @@ module Fila
     # callers can rescue specific error classes.
     def parse_error_frame(payload)
       msg = payload.force_encoding('UTF-8')
+      error_from_message(msg)
+    end
 
-      if msg.include?('authentication') || msg.include?('unauthenticated') ||
-         msg.include?('api key') || msg.include?('OP_AUTH')
-        return RPCError.new(ERR_UNAUTHENTICATED, msg)
-      end
-
-      if msg.include?('queue not found') || msg.include?('queue does not exist')
-        return QueueNotFoundError.new(msg)
-      end
-
-      if msg.include?('message not found') || msg.include?('lease not found')
-        return MessageNotFoundError.new(msg)
-      end
+    # Map a plain-text FIBP error message to the appropriate Ruby exception.
+    def error_from_message(msg)
+      return RPCError.new(ERR_UNAUTHENTICATED, msg) if auth_error?(msg)
+      return QueueNotFoundError.new(msg)            if queue_not_found_error?(msg)
+      return MessageNotFoundError.new(msg)          if message_not_found_error?(msg)
 
       RPCError.new(0, msg)
+    end
+
+    def auth_error?(msg)
+      msg.include?('authentication') || msg.include?('unauthenticated') ||
+        msg.include?('api key') || msg.include?('OP_AUTH')
+    end
+
+    def queue_not_found_error?(msg)
+      msg.include?('queue not found') || msg.include?('queue does not exist')
+    end
+
+    def message_not_found_error?(msg)
+      msg.include?('message not found') || msg.include?('lease not found')
     end
 
     def write_frame(opcode, corr_id, payload)
