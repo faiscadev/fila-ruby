@@ -2,7 +2,6 @@
 
 require 'socket'
 require 'openssl'
-require 'thread'
 
 module Fila
   # Low-level FIBP (Fila Binary Protocol) transport.
@@ -17,8 +16,8 @@ module Fila
   #
   # @api private
   class Transport # rubocop:disable Metrics/ClassLength
-    HANDSHAKE    = "FIBP\x01\x00".b.freeze
-    HEADER_SIZE  = 6  # flags:u8 + op:u8 + corr_id:u32
+    HANDSHAKE   = "FIBP\x01\x00".b.freeze
+    HEADER_SIZE = 6 # flags:u8 + op:u8 + corr_id:u32
 
     # Op codes
     OP_ENQUEUE      = 0x01
@@ -32,15 +31,15 @@ module Fila
     OP_GOAWAY       = 0xFF
 
     # Frame flags
-    FLAG_SERVER_PUSH = 0x04  # bit 2: server-push message frame
+    FLAG_SERVER_PUSH = 0x04 # bit 2: server-push message frame
 
     # Error codes returned by the server inside ERROR frames
     ERR_QUEUE_NOT_FOUND    = 1
     ERR_MESSAGE_NOT_FOUND  = 2
     ERR_UNAUTHENTICATED    = 3
 
-    # Sentinel pushed to a pending queue when the connection closes.
-    ConnectionClosed = Class.new(StandardError)
+    # Sentinel raised when the connection is closed.
+    class ConnectionClosed < StandardError; end
 
     # @param host [String]
     # @param port [Integer]
@@ -49,7 +48,9 @@ module Fila
     # @param client_cert [String, nil] PEM client cert (mTLS)
     # @param client_key [String, nil] PEM client key (mTLS)
     # @param api_key [String, nil]
-    def initialize(host:, port:, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
+    def initialize( # rubocop:disable Metrics/ParameterLists
+      host:, port:, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil
+    )
       @host        = host
       @port        = port
       @tls         = tls || ca_cert
@@ -72,11 +73,11 @@ module Fila
 
     # Send a request frame and block until the response arrives.
     #
-    # @param op [Integer] op code
+    # @param opcode [Integer] op code
     # @param payload [String] binary payload (encoding: BINARY)
     # @return [String] response payload
     # @raise [Fila::QueueNotFoundError, Fila::MessageNotFoundError, Fila::RPCError, ConnectionClosed]
-    def request(op, payload)
+    def request(opcode, payload)
       corr_id = next_corr_id
       result_q = Queue.new
 
@@ -86,7 +87,7 @@ module Fila
         @pending[corr_id] = result_q
       end
 
-      write_frame(op, corr_id, payload)
+      write_frame(opcode, corr_id, payload)
 
       outcome = result_q.pop
       case outcome
@@ -123,7 +124,11 @@ module Fila
     # Close the connection.
     def close
       @mutex.synchronize { @closed = true }
-      @socket.close rescue nil
+      begin
+        @socket.close
+      rescue IOError, OpenSSL::SSL::SSLError
+        nil
+      end
       @reader_thread&.join(2)
       drain_pending
     end
@@ -195,31 +200,20 @@ module Fila
 
     def dispatch_frame(frame)
       flags   = frame.getbyte(0)
-      op      = frame.getbyte(1)
+      opcode  = frame.getbyte(1)
       corr_id = frame.byteslice(2, 4).unpack1('N')
       payload = frame.byteslice(HEADER_SIZE, frame.bytesize - HEADER_SIZE) || ''.b
 
       dest = @mutex.synchronize { @pending[corr_id] }
       return unless dest
 
-      if op == OP_ERROR
-        err = parse_error_frame(payload)
-        if flags & FLAG_SERVER_PUSH != 0
-          dest.push(err)
-        else
-          @mutex.synchronize { @pending.delete(corr_id) }
-          dest.push(err)
-        end
-      elsif op == OP_GOAWAY
-        drain_pending
-      elsif flags & FLAG_SERVER_PUSH != 0
-        # Server-push consume frame: leave @pending intact, push payload
-        dest.push(payload)
-      else
-        # Normal response: remove pending, push payload
-        @mutex.synchronize { @pending.delete(corr_id) }
-        dest.push(payload)
-      end
+      return drain_pending if opcode == OP_GOAWAY
+
+      push_only = flags.anybits?(FLAG_SERVER_PUSH)
+      result    = opcode == OP_ERROR ? parse_error_frame(payload) : payload
+
+      @mutex.synchronize { @pending.delete(corr_id) } unless push_only
+      dest.push(result)
     end
 
     def parse_error_frame(payload)
@@ -234,10 +228,10 @@ module Fila
       end
     end
 
-    def write_frame(op, corr_id, payload)
-      flags   = 0
-      header  = [flags, op, corr_id].pack('CCN')
-      body    = header + payload.b
+    def write_frame(opcode, corr_id, payload)
+      flags  = 0
+      header = [flags, opcode, corr_id].pack('CCN')
+      body   = header + payload.b
       write_raw([body.bytesize].pack('N') + body)
     end
 
@@ -249,10 +243,10 @@ module Fila
       raise ConnectionClosed, "write failed: #{e.message}"
     end
 
-    def read_raw(n)
+    def read_raw(num_bytes)
       buf = ''.b
-      while buf.bytesize < n
-        chunk = @socket.read(n - buf.bytesize)
+      while buf.bytesize < num_bytes
+        chunk = @socket.read(num_bytes - buf.bytesize)
         return nil if chunk.nil? || chunk.empty?
 
         buf << chunk
@@ -270,7 +264,11 @@ module Fila
     def drain_pending
       err = ConnectionClosed.new('connection closed')
       @mutex.synchronize do
-        @pending.each_value { |q| q.push(err) rescue nil }
+        @pending.each_value do |queue|
+          queue.push(err)
+        rescue StandardError
+          nil
+        end
         @pending.clear
       end
     end

@@ -6,7 +6,7 @@ module Fila
   # All strings are UTF-8; all lengths and integers are big-endian.
   #
   # @api private
-  module Codec
+  module Codec # rubocop:disable Metrics/ModuleLength
     module_function
 
     # -----------------------------------------------------------------------
@@ -26,7 +26,7 @@ module Fila
       queue_b = queue.encode('UTF-8').b
       buf = [queue_b.bytesize].pack('n') + queue_b
       buf += [messages.size].pack('n')
-      messages.each { |m| buf += encode_message(m) }
+      messages.each { |msg| buf += encode_message(msg) }
       buf
     end
 
@@ -70,49 +70,17 @@ module Fila
 
     # Decode a server-push consume message frame payload.
     #
-    # The server pushes individual messages (flags bit 2 set).
-    # Each push frame has the same layout as a single message entry
-    # preceded by a 1-element count (i.e., msg_count:u16 = 1, then the message).
-    #
     # @param payload [String] raw binary frame payload
     # @return [ConsumeMessage, nil]
     def decode_consume_push(payload)
       pos = 0
-
-      # msg_id
-      id_len, pos = read_u16(payload, pos)
-      msg_id = payload.byteslice(pos, id_len).force_encoding('UTF-8')
-      pos += id_len
-
-      # fairness_key
-      fk_len, pos = read_u16(payload, pos)
-      fairness_key = payload.byteslice(pos, fk_len).force_encoding('UTF-8')
-      pos += fk_len
-
-      # attempt_count
-      attempt_count, pos = read_u32(payload, pos)
-
-      # queue_id
-      qid_len, pos = read_u16(payload, pos)
-      queue_id = payload.byteslice(pos, qid_len).force_encoding('UTF-8')
-      pos += qid_len
-
-      # headers
-      header_count, pos = read_u8(payload, pos)
-      headers = {}
-      header_count.times do
-        k_len, pos = read_u16(payload, pos)
-        k = payload.byteslice(pos, k_len).force_encoding('UTF-8')
-        pos += k_len
-        v_len, pos = read_u16(payload, pos)
-        v = payload.byteslice(pos, v_len).force_encoding('UTF-8')
-        pos += v_len
-        headers[k] = v
-      end
-
-      # payload
-      pay_len, pos = read_u32(payload, pos)
-      body = payload.byteslice(pos, pay_len)
+      msg_id, pos         = read_str16(payload, pos)
+      fairness_key, pos   = read_str16(payload, pos)
+      attempt_count, pos  = read_u32(payload, pos)
+      queue_id, pos       = read_str16(payload, pos)
+      headers, pos        = read_headers(payload, pos)
+      pay_len, pos        = read_u32(payload, pos)
+      body                = payload.byteslice(pos, pay_len)
 
       ConsumeMessage.new(
         id: msg_id,
@@ -192,9 +160,9 @@ module Fila
     def encode_message(msg)
       headers = msg[:headers] || {}
       buf = [headers.size].pack('C')
-      headers.each do |k, v|
-        buf += encode_str16(k.to_s)
-        buf += encode_str16(v.to_s)
+      headers.each do |key, val|
+        buf += encode_str16(key.to_s)
+        buf += encode_str16(val.to_s)
       end
       payload_b = (msg[:payload] || '').b
       buf += [payload_b.bytesize].pack('N') + payload_b
@@ -202,8 +170,24 @@ module Fila
     end
 
     def encode_str16(str)
-      b = str.encode('UTF-8').b
-      [b.bytesize].pack('n') + b
+      bytes = str.encode('UTF-8').b
+      [bytes.bytesize].pack('n') + bytes
+    end
+
+    def read_str16(buf, pos)
+      len, pos = read_u16(buf, pos)
+      [buf.byteslice(pos, len).force_encoding('UTF-8'), pos + len]
+    end
+
+    def read_headers(buf, pos)
+      count, pos = read_u8(buf, pos)
+      headers = {}
+      count.times do
+        key, pos = read_str16(buf, pos)
+        val, pos = read_str16(buf, pos)
+        headers[key] = val
+      end
+      [headers, pos]
     end
 
     def read_u8(buf, pos)

@@ -13,7 +13,7 @@ FILA_SERVER_BIN = ENV.fetch('FILA_SERVER_BIN') do
 end
 FILA_SERVER_AVAILABLE = File.exist?(FILA_SERVER_BIN)
 
-module TestServerHelper
+module TestServerHelper # rubocop:disable Metrics/ModuleLength
   def self.find_free_port
     server = TCPServer.new('127.0.0.1', 0)
     port = server.addr[1]
@@ -28,7 +28,7 @@ module TestServerHelper
   # @param bootstrap_apikey [String, nil] optional bootstrap API key
   # @return [Hash] server info with :addr, :host, :port, :pid, :data_dir
   #   and optional :tls_config, :bootstrap_apikey
-  def self.start(tls_config: nil, bootstrap_apikey: nil) # rubocop:disable Metrics/MethodLength
+  def self.start(tls_config: nil, bootstrap_apikey: nil)
     port = find_free_port
     addr = "127.0.0.1:#{port}"
 

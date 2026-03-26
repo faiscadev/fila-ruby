@@ -127,19 +127,19 @@ module Fila
 
     # Flush a batch of items via the FIBP transport.
     # Groups items by queue to produce one frame per queue.
-    def flush_batch(items) # rubocop:disable Metrics/MethodLength
+    def flush_batch(items) # rubocop:disable Metrics/AbcSize
       # Group by queue, preserving per-item result queues
       groups = items.each_with_index.group_by { |item, _| item.message[:queue] }
 
       groups.each do |queue, indexed_items|
-        items_only  = indexed_items.map(&:first)
-        msgs        = items_only.map(&:message)
-        payload     = Codec.encode_enqueue(queue, msgs)
-        resp        = @transport.request(Transport::OP_ENQUEUE, payload)
-        results     = Codec.decode_enqueue_response(resp)
+        items_only = indexed_items.map(&:first)
+        msgs       = items_only.map(&:message)
+        payload    = Codec.encode_enqueue(queue, msgs)
+        resp       = @transport.request(Transport::OP_ENQUEUE, payload)
+        results    = Codec.decode_enqueue_response(resp)
 
-        items_only.each_with_index do |item, i|
-          item.result_queue.push(result_to_outcome(results[i]))
+        items_only.each_with_index do |item, idx|
+          item.result_queue.push(result_to_outcome(results[idx]))
         end
       end
     rescue Transport::ConnectionClosed => e
@@ -157,7 +157,11 @@ module Fila
     end
 
     def broadcast_error(items, err)
-      items.each { |item| item.result_queue.push(err) rescue nil } # rubocop:disable Style/RescueModifier
+      items.each do |item|
+        item.result_queue.push(err)
+      rescue StandardError
+        nil
+      end
     end
 
     def current_time_ms

@@ -175,14 +175,12 @@ module Fila
     private
 
     def parse_addr(addr)
-      # Support "host:port" with IPv6 like "[::1]:5555"
-      if addr =~ /\A\[(.+)\]:(\d+)\z/
-        [$1, $2.to_i]
-      elsif addr =~ /\A(.+):(\d+)\z/
-        [$1, $2.to_i]
-      else
-        raise ArgumentError, "invalid address #{addr.inspect}, expected host:port"
-      end
+      # Support "host:port" and IPv6 "[::1]:5555"
+      pattern = addr.start_with?('[') ? /\A\[(.+)\]:(\d+)\z/ : /\A(.+):(\d+)\z/
+      m = addr.match(pattern)
+      raise ArgumentError, "invalid address #{addr.inspect}, expected host:port" unless m
+
+      [m[1], m[2].to_i]
     end
 
     def validate_batch_mode(mode)
@@ -215,11 +213,9 @@ module Fila
       result  = results.first
       raise RPCError.new(0, 'no result from server') if result.nil?
 
-      if result.success?
-        result.message_id
-      else
-        raise QueueNotFoundError, "enqueue: #{result.error}"
-      end
+      raise QueueNotFoundError, "enqueue: #{result.error}" unless result.success?
+
+      result.message_id
     rescue Transport::ConnectionClosed => e
       raise RPCError.new(0, "connection closed: #{e.message}")
     end
@@ -263,12 +259,12 @@ module Fila
       @transport.stop_consume(corr_id) if corr_id
     end
 
-    def raise_ack_nack_error(result, op)
+    def raise_ack_nack_error(result, operation)
       case result[:err_code]
       when Transport::ERR_MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "#{op}: #{result[:err_msg]}"
+        raise MessageNotFoundError, "#{operation}: #{result[:err_msg]}"
       else
-        raise RPCError.new(result[:err_code], "#{op}: #{result[:err_msg]}")
+        raise RPCError.new(result[:err_code], "#{operation}: #{result[:err_msg]}")
       end
     end
   end
