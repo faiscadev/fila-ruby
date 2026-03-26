@@ -87,7 +87,7 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
         sock.close
         ready = true
         break
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
+      rescue SystemCallError
         sleep 0.05
       end
     end
