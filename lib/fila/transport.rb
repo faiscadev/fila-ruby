@@ -292,9 +292,12 @@ module Fila
       buf
     end
 
+    # corr_id=0 is permanently reserved for server-push frames.  Regular
+    # request IDs cycle through 1..0xFFFFFFFF so they never collide.
     def next_corr_id
       @mutex.synchronize do
-        @corr_seq = (@corr_seq + 1) & 0xFFFFFFFF
+        @corr_seq += 1
+        @corr_seq = 1 if @corr_seq > 0xFFFFFFFF
         @corr_seq
       end
     end
