@@ -80,11 +80,14 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
     ready = false
     while Time.now < deadline
       begin
-        transport = admin_transport(server_info)
-        transport.close
+        # Use a plain TCP connect to check the port is accepting connections.
+        # A full FIBP handshake would fail against a non-FIBP server (e.g. old
+        # gRPC binary), masking real startup failures.
+        sock = TCPSocket.new(server_info[:host], server_info[:port])
+        sock.close
         ready = true
         break
-      rescue StandardError
+      rescue Errno::ECONNREFUSED, Errno::ECONNRESET
         sleep 0.05
       end
     end
