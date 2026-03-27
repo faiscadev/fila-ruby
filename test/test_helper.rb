@@ -212,12 +212,12 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
   end
 
   # Send a CreateQueue admin frame via FIBP.
-  # The payload is a protobuf-encoded CreateQueueRequest { name: <string> }.
+  # The payload uses binary wire format (same as data ops).
   OP_CREATE_QUEUE = 0x10
 
   def self.create_queue(server, name)
     transport = admin_transport(server)
-    payload   = proto_encode_create_queue(name)
+    payload   = binary_encode_create_queue(name)
     transport.request(OP_CREATE_QUEUE, payload)
   rescue StandardError => e
     raise "create_queue #{name.inspect} failed: #{e.message}"
@@ -225,22 +225,19 @@ module TestServerHelper # rubocop:disable Metrics/ModuleLength
     transport&.close
   end
 
-  # Hand-encode a CreateQueueRequest protobuf message.
+  # Encode a CreateQueue request using the binary wire format.
   #
-  # CreateQueueRequest { string name = 1; QueueConfig config = 2; }
-  #
-  # We only set field 1 (name).  For strings ≤ 127 bytes the varint length
-  # fits in one byte, which covers all queue names used in tests.
-  #
-  # Proto3 wire format for a string field:
-  #   tag:   (field_number << 3) | wire_type  → field 1, wire type 2 → 0x0a
-  #   len:   varint-encoded byte length of the string
-  #   data:  UTF-8 bytes
-  def self.proto_encode_create_queue(name)
+  # Wire format:
+  #   queue_len:u16 + queue:utf8
+  #   + on_enqueue_len:u16 + on_enqueue:utf8
+  #   + on_failure_len:u16 + on_failure:utf8
+  #   + visibility_timeout_ms:u32
+  def self.binary_encode_create_queue(name)
     name_b = name.encode('UTF-8').b
-    raise ArgumentError, "queue name too long (#{name_b.bytesize} bytes)" if name_b.bytesize > 127
-
-    "\x0a".b + [name_b.bytesize].pack('C') + name_b
+    [name_b.bytesize].pack('n') + name_b +
+      [0].pack('n') +  # on_enqueue: empty
+      [0].pack('n') +  # on_failure: empty
+      [0].pack('N')    # visibility_timeout_ms: 0
   end
 
   # Probe whether the running server binary supports TLS.  Some bleeding-edge
