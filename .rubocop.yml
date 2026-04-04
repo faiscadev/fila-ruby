@@ -3,8 +3,10 @@ AllCops:
   NewCops: enable
   SuggestExtensions: false
   Exclude:
-    - 'lib/fila/proto/**/*'
     - 'vendor/**/*'
+
+Metrics/ClassLength:
+  Max: 300
 
 Metrics/MethodLength:
   Max: 25

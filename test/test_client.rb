@@ -11,6 +11,7 @@ class TestClient < Minitest::Test
   end
 
   def teardown
+    @client&.close
     TestServerHelper.stop(@server) if @server
   end
 

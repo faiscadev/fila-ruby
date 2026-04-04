@@ -1,6 +1,6 @@
 # fila-ruby
 
-Ruby client SDK for the [Fila](https://github.com/faisca/fila) message broker.
+Ruby client SDK for the [Fila](https://github.com/faisca/fila) message broker using the FIBP binary protocol.
 
 ## Installation
 
@@ -44,21 +44,9 @@ end
 client.close
 ```
 
-### TLS (system trust store)
-
-```ruby
-require "fila"
-
-# TLS using the OS system trust store (e.g., server uses a public CA).
-client = Fila::Client.new("localhost:5555", tls: true)
-```
-
 ### TLS (custom CA)
 
 ```ruby
-require "fila"
-
-# TLS with an explicit CA certificate (e.g., private/self-signed CA).
 client = Fila::Client.new("localhost:5555",
   ca_cert: File.read("ca.pem")
 )
@@ -67,16 +55,6 @@ client = Fila::Client.new("localhost:5555",
 ### mTLS (mutual TLS)
 
 ```ruby
-require "fila"
-
-# Mutual TLS with system trust store.
-client = Fila::Client.new("localhost:5555",
-  tls: true,
-  client_cert: File.read("client.pem"),
-  client_key: File.read("client-key.pem")
-)
-
-# Mutual TLS with explicit CA certificate.
 client = Fila::Client.new("localhost:5555",
   ca_cert: File.read("ca.pem"),
   client_cert: File.read("client.pem"),
@@ -87,9 +65,6 @@ client = Fila::Client.new("localhost:5555",
 ### API Key Authentication
 
 ```ruby
-require "fila"
-
-# API key sent as Bearer token on every request.
 client = Fila::Client.new("localhost:5555",
   api_key: "fila_your_api_key_here"
 )
@@ -98,9 +73,6 @@ client = Fila::Client.new("localhost:5555",
 ### mTLS + API Key
 
 ```ruby
-require "fila"
-
-# Full security: mTLS transport + API key authentication.
 client = Fila::Client.new("localhost:5555",
   ca_cert: File.read("ca.pem"),
   client_cert: File.read("client.pem"),
@@ -109,9 +81,73 @@ client = Fila::Client.new("localhost:5555",
 )
 ```
 
+### Batch Enqueue
+
+```ruby
+results = client.enqueue_many([
+  { queue: "orders", payload: "order-1", headers: { "tenant" => "acme" } },
+  { queue: "orders", payload: "order-2" },
+])
+
+results.each do |r|
+  if r.success?
+    puts "Enqueued: #{r.message_id}"
+  else
+    puts "Failed: #{r.error}"
+  end
+end
+```
+
+### Admin Operations
+
+```ruby
+# Create a queue.
+client.create_queue(name: "my-queue")
+
+# Delete a queue.
+client.delete_queue(queue: "my-queue")
+
+# Get queue statistics.
+stats = client.get_stats(queue: "my-queue")
+
+# List all queues.
+queues = client.list_queues
+
+# Runtime configuration.
+client.set_config(key: "queues.my-queue.visibility_timeout_ms", value: "30000")
+value = client.get_config(key: "queues.my-queue.visibility_timeout_ms")
+entries = client.list_config(prefix: "queues.")
+
+# Redrive DLQ messages.
+count = client.redrive(dlq_queue: "my-queue-dlq", count: 100)
+```
+
+### Auth Operations
+
+```ruby
+# Create an API key.
+result = client.create_api_key(name: "my-key", is_superadmin: false)
+puts result[:key]
+
+# Revoke an API key.
+client.revoke_api_key(key_id: result[:key_id])
+
+# List API keys.
+keys = client.list_api_keys
+
+# Set ACL permissions.
+client.set_acl(key_id: "key-id", permissions: [
+  { kind: "produce", pattern: "orders.*" },
+  { kind: "consume", pattern: "orders.*" },
+])
+
+# Get ACL permissions.
+acl = client.get_acl(key_id: "key-id")
+```
+
 ## API
 
-### `Fila::Client.new(addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)`
+### `Fila::Client.new(addr, ...)`
 
 Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
 
@@ -122,47 +158,46 @@ Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
 | `ca_cert:` | `String` or `nil` | PEM-encoded CA certificate for TLS (implies `tls: true`) |
 | `client_cert:` | `String` or `nil` | PEM-encoded client certificate for mTLS |
 | `client_key:` | `String` or `nil` | PEM-encoded client private key for mTLS |
-| `api_key:` | `String` or `nil` | API key for Bearer token authentication |
+| `api_key:` | `String` or `nil` | API key sent during FIBP handshake |
+| `batch_mode:` | `Symbol` | `:auto` (default), `:linger`, or `:disabled` |
 
-When no TLS/auth options are provided, the client connects over plaintext (backward compatible). When `tls: true` is set without `ca_cert:`, the OS system trust store is used for server certificate verification.
-
-### `client.enqueue(queue:, headers:, payload:)`
+### `client.enqueue(queue:, payload:, headers: nil)`
 
 Enqueue a message. Returns the broker-assigned message ID (UUIDv7).
 
+### `client.enqueue_many(messages)`
+
+Enqueue multiple messages in a single request. Returns an array of `Fila::EnqueueResult`.
+
 ### `client.consume(queue:) { |msg| ... }`
 
-Open a streaming consumer. Yields `Fila::ConsumeMessage` objects as they become available. If no block is given, returns an `Enumerator`. Nacked messages are redelivered on the same stream.
+Open a streaming consumer. Yields `Fila::ConsumeMessage` objects. If no block is given, returns an `Enumerator`.
 
 ### `client.ack(queue:, msg_id:)`
 
-Acknowledge a successfully processed message. The message is permanently removed.
+Acknowledge a successfully processed message.
 
 ### `client.nack(queue:, msg_id:, error:)`
 
-Negatively acknowledge a failed message. The message is requeued or routed to the dead-letter queue based on the queue's configuration.
+Negatively acknowledge a failed message.
 
 ### `client.close`
 
-Close the underlying gRPC channel.
+Drain pending batches and close the TCP connection.
 
 ## Error Handling
 
 Per-operation error classes are raised for specific failure modes:
 
-```ruby
-begin
-  client.enqueue(queue: "missing-queue", payload: "test")
-rescue Fila::QueueNotFoundError => e
-  # handle queue not found
-end
-
-begin
-  client.ack(queue: "my-queue", msg_id: "missing-id")
-rescue Fila::MessageNotFoundError => e
-  # handle message not found
-end
-```
+| Error Class | Description |
+|---|---|
+| `Fila::QueueNotFoundError` | Queue does not exist |
+| `Fila::MessageNotFoundError` | Message not found or not leased |
+| `Fila::QueueAlreadyExistsError` | Queue already exists |
+| `Fila::AuthenticationError` | Missing or invalid API key |
+| `Fila::ForbiddenError` | Insufficient permissions |
+| `Fila::NotLeaderError` | Not the leader (includes leader hint) |
+| `Fila::RPCError` | Transport or protocol failure |
 
 ## License
 
