@@ -137,6 +137,7 @@ module Fila
           store = OpenSSL::X509::Store.new
           store.add_cert(OpenSSL::X509::Certificate.new(@ca_cert))
           ctx.cert_store = store
+          ctx.verify_mode = OpenSSL::SSL::VERIFY_PEER
         else
           ctx.set_params # uses system trust store
         end

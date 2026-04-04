@@ -458,9 +458,9 @@ module Fila
     def encode_enqueue_batch(messages)
       payload = FIBP::Codec.encode_u32(messages.size)
       messages.each do |m|
-        payload += FIBP::Codec.encode_string(m[:queue]) +
-                   FIBP::Codec.encode_map(m[:headers] || {}) +
-                   FIBP::Codec.encode_bytes(m[:payload])
+        payload << FIBP::Codec.encode_string(m[:queue])
+        payload << FIBP::Codec.encode_map(m[:headers] || {})
+        payload << FIBP::Codec.encode_bytes(m[:payload])
       end
       payload
     end
@@ -491,6 +491,9 @@ module Fila
     rescue NotLeaderError => e
       raise if redirected || e.leader_addr.nil?
 
+      done[0] = true
+      @conn&.cancel_consume(rid) if rid
+      rid = nil
       reconnect_to(e.leader_addr)
       consume_with_redirect(queue: queue, redirected: true, &block)
     rescue LocalJumpError
@@ -554,6 +557,7 @@ module Fila
     def reconnect_to(addr)
       @conn&.close
       @conn = build_connection(addr)
+      @batcher.conn = @conn if @batcher
     end
 
     def raise_from_error_frame(resp)
@@ -587,6 +591,64 @@ module Fila
       else
         raise RPCError.new(code, "#{context} failed")
       end
+    end
+
+    def decode_stats_result(resp)
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'get stats') unless code == FIBP::ErrorCodes::OK
+
+      result = {
+        depth: reader.read_u64,
+        in_flight: reader.read_u64,
+        active_fairness_keys: reader.read_u64,
+        active_consumers: reader.read_u32,
+        quantum: reader.read_u32,
+        leader_node_id: reader.read_u64,
+        replication_count: reader.read_u32
+      }
+
+      per_key_count = reader.read_u16
+      result[:per_key_stats] = Array.new(per_key_count) do
+        {
+          key: reader.read_string,
+          pending_count: reader.read_u64,
+          current_deficit: reader.read_i64,
+          weight: reader.read_u32
+        }
+      end
+
+      per_throttle_count = reader.read_u16
+      result[:per_throttle_stats] = Array.new(per_throttle_count) do
+        {
+          key: reader.read_string,
+          tokens: reader.read_f64,
+          rate_per_second: reader.read_f64,
+          burst: reader.read_f64
+        }
+      end
+
+      result
+    end
+
+    def decode_list_queues_result(resp)
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'list queues') unless code == FIBP::ErrorCodes::OK
+
+      cluster_node_count = reader.read_u32
+      queue_count = reader.read_u16
+      queues = Array.new(queue_count) do
+        {
+          name: reader.read_string,
+          depth: reader.read_u64,
+          in_flight: reader.read_u64,
+          active_consumers: reader.read_u32,
+          leader_node_id: reader.read_u64
+        }
+      end
+
+      { cluster_node_count: cluster_node_count, queues: queues }
     end
 
     def error_name(code)

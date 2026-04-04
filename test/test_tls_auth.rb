@@ -94,11 +94,14 @@ class TestApiKeyAuth < Minitest::Test
   def test_enqueue_without_api_key_rejected
     TestServerHelper.create_queue(@server, 'auth-reject-queue')
 
+    client_no_key = nil
     err = assert_raises(Fila::AuthenticationError) do
       client_no_key = Fila::Client.new(@server[:addr])
       client_no_key.enqueue(queue: 'auth-reject-queue', payload: 'should fail')
     end
     assert_match(/unauthorized/i, err.message)
+  ensure
+    client_no_key&.close
   end
 
   def test_consume_with_api_key
@@ -241,6 +244,7 @@ class TestTlsWithApiKey < Minitest::Test
   def test_no_api_key_over_tls_rejected
     TestServerHelper.create_queue(@server, 'tls-auth-reject-queue')
 
+    client_no_key = nil
     err = assert_raises(Fila::AuthenticationError) do
       client_no_key = Fila::Client.new(
         @server[:addr],
@@ -249,6 +253,8 @@ class TestTlsWithApiKey < Minitest::Test
       client_no_key.enqueue(queue: 'tls-auth-reject-queue', payload: 'should fail')
     end
     assert_match(/unauthorized/i, err.message)
+  ensure
+    client_no_key&.close
   end
 end
 

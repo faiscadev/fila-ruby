@@ -10,6 +10,8 @@ module Fila
     # An item queued for batching, pairing a message hash with its result slot.
     BatchItem = Struct.new(:message, :result_queue, keyword_init: true)
 
+    attr_writer :conn
+
     # @param conn [Fila::FIBP::Connection] FIBP connection
     # @param mode [Symbol] :auto or :linger
     # @param max_batch_size [Integer] cap on batch size (auto mode)
@@ -157,9 +159,9 @@ module Fila
     def encode_enqueue_batch(messages)
       buf = FIBP::Codec.encode_u32(messages.size)
       messages.each do |m|
-        buf += FIBP::Codec.encode_string(m[:queue]) +
-               FIBP::Codec.encode_map(m[:headers] || {}) +
-               FIBP::Codec.encode_bytes(m[:payload])
+        buf << FIBP::Codec.encode_string(m[:queue])
+        buf << FIBP::Codec.encode_map(m[:headers] || {})
+        buf << FIBP::Codec.encode_bytes(m[:payload])
       end
       buf
     end
