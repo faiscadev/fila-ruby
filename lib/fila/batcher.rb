@@ -145,7 +145,11 @@ module Fila
       reader = FIBP::Codec::Reader.new(resp)
       count = reader.read_u32
       items.each_with_index do |item, idx|
-        outcome = idx < count ? result_to_outcome(reader.read_u8, reader.read_string) : Fila::Error.new('no result from server')
+        outcome = if idx < count
+                    result_to_outcome(reader.read_u8, reader.read_string)
+                  else
+                    Fila::Error.new('no result from server')
+                  end
         item.result_queue.push(outcome)
       end
     end

@@ -383,6 +383,17 @@ module Fila
       { key_id: key_id_resp, is_superadmin: is_superadmin, permissions: permissions }
     end
 
+    ERROR_CODE_TO_CLASS = {
+      FIBP::ErrorCodes::QUEUE_NOT_FOUND => QueueNotFoundError,
+      FIBP::ErrorCodes::MESSAGE_NOT_FOUND => MessageNotFoundError,
+      FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS => QueueAlreadyExistsError,
+      FIBP::ErrorCodes::UNAUTHORIZED => AuthenticationError,
+      FIBP::ErrorCodes::FORBIDDEN => ForbiddenError,
+      FIBP::ErrorCodes::API_KEY_NOT_FOUND => ApiKeyNotFoundError
+    }.freeze
+
+    private_constant :ERROR_CODE_TO_CLASS
+
     private
 
     def validate_batch_mode(mode)
@@ -468,13 +479,13 @@ module Fila
       end
     end
 
-    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics
+    def consume_with_redirect(queue:, redirected:, &block)
       payload = FIBP::Codec.encode_string(queue)
       delivery_queue = Queue.new
-      consumer_done = false
+      done = [false] # mutable container for closure capture
       rid = nil
 
-      rid, response = subscribe_to_queue(payload, delivery_queue, consumer_done)
+      rid, response = subscribe_to_queue(payload, delivery_queue, done)
       check_consume_response(response)
       consume_delivery_loop(delivery_queue, &block)
     rescue NotLeaderError => e
@@ -485,13 +496,13 @@ module Fila
     rescue LocalJumpError
       nil # Consumer break
     ensure
-      consumer_done = true
+      done[0] = true
       @conn&.cancel_consume(rid) if rid
     end
 
-    def subscribe_to_queue(payload, delivery_queue, consumer_done)
+    def subscribe_to_queue(payload, delivery_queue, done)
       @conn.subscribe(FIBP::Opcodes::CONSUME, payload) do |_opcode, del_payload|
-        delivery_queue.push(del_payload) unless consumer_done
+        delivery_queue.push(del_payload) unless done[0]
       end
     end
 
@@ -545,24 +556,13 @@ module Fila
       @conn = build_connection(addr)
     end
 
-    ERROR_CODE_TO_CLASS = {
-      FIBP::ErrorCodes::QUEUE_NOT_FOUND => QueueNotFoundError,
-      FIBP::ErrorCodes::MESSAGE_NOT_FOUND => MessageNotFoundError,
-      FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS => QueueAlreadyExistsError,
-      FIBP::ErrorCodes::UNAUTHORIZED => AuthenticationError,
-      FIBP::ErrorCodes::FORBIDDEN => ForbiddenError,
-      FIBP::ErrorCodes::API_KEY_NOT_FOUND => ApiKeyNotFoundError
-    }.freeze
-
     def raise_from_error_frame(resp)
       reader = FIBP::Codec::Reader.new(resp)
       code = reader.read_u8
       message = reader.read_string
       metadata = reader.remaining.positive? ? reader.read_map : {}
 
-      if code == FIBP::ErrorCodes::NOT_LEADER
-        raise NotLeaderError.new(message, leader_addr: metadata['leader_addr'])
-      end
+      raise NotLeaderError.new(message, leader_addr: metadata['leader_addr']) if code == FIBP::ErrorCodes::NOT_LEADER
 
       klass = ERROR_CODE_TO_CLASS[code]
       raise klass, message if klass

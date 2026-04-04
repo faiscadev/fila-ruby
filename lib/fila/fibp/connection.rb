@@ -235,7 +235,7 @@ module Fila
         [opcode, payload]
       end
 
-      def read_frame_with_id # rubocop:disable Metrics/AbcSize
+      def read_frame_with_id
         @read_monitor.synchronize do
           loop do
             opcode, flags, request_id, payload = read_raw_frame
