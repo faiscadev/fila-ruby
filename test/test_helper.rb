@@ -74,12 +74,14 @@ module TestServerHelper
     # Wait for server ready.
     deadline = Time.now + 10
     ready = false
+    last_error = nil
     while Time.now < deadline
       begin
         Timeout.timeout(3) { try_list_queues(addr, conn_opts) }
         ready = true
         break
-      rescue StandardError
+      rescue StandardError => e
+        last_error = e
         sleep 0.1
       end
     end
@@ -93,7 +95,8 @@ module TestServerHelper
         ''
       end
       FileUtils.rm_rf(data_dir)
-      raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
+      raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\n" \
+            "Stderr:\n#{stderr_output}\nLast error: #{last_error&.class}: #{last_error&.message}"
     end
 
     {
