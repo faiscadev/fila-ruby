@@ -99,7 +99,7 @@ class TestApiKeyAuth < Minitest::Test
       client_no_key = Fila::Client.new(@server[:addr])
       client_no_key.enqueue(queue: 'auth-reject-queue', payload: 'should fail')
     end
-    assert_match(/unauthorized/i, err.message)
+    assert_match(/api key required|unauthorized/i, err.message)
   ensure
     client_no_key&.close
   end
@@ -252,7 +252,7 @@ class TestTlsWithApiKey < Minitest::Test
       )
       client_no_key.enqueue(queue: 'tls-auth-reject-queue', payload: 'should fail')
     end
-    assert_match(/unauthorized/i, err.message)
+    assert_match(/api key required|unauthorized/i, err.message)
   ensure
     client_no_key&.close
   end

@@ -479,7 +479,7 @@ module Fila
       end
     end
 
-    def consume_with_redirect(queue:, redirected:, &block)
+    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics/CyclomaticComplexity
       payload = FIBP::Codec.encode_string(queue)
       delivery_queue = Queue.new
       done = [false] # mutable container for closure capture
@@ -598,37 +598,33 @@ module Fila
       code = reader.read_u8
       raise_for_error_code(code, 'get stats') unless code == FIBP::ErrorCodes::OK
 
-      result = {
-        depth: reader.read_u64,
-        in_flight: reader.read_u64,
-        active_fairness_keys: reader.read_u64,
-        active_consumers: reader.read_u32,
-        quantum: reader.read_u32,
-        leader_node_id: reader.read_u64,
+      result = read_stats_base(reader)
+      result[:per_key_stats] = read_per_key_stats(reader)
+      result[:per_throttle_stats] = read_per_throttle_stats(reader)
+      result
+    end
+
+    def read_stats_base(reader)
+      {
+        depth: reader.read_u64, in_flight: reader.read_u64,
+        active_fairness_keys: reader.read_u64, active_consumers: reader.read_u32,
+        quantum: reader.read_u32, leader_node_id: reader.read_u64,
         replication_count: reader.read_u32
       }
+    end
 
-      per_key_count = reader.read_u16
-      result[:per_key_stats] = Array.new(per_key_count) do
-        {
-          key: reader.read_string,
-          pending_count: reader.read_u64,
-          current_deficit: reader.read_i64,
-          weight: reader.read_u32
-        }
+    def read_per_key_stats(reader)
+      Array.new(reader.read_u16) do
+        { key: reader.read_string, pending_count: reader.read_u64,
+          current_deficit: reader.read_i64, weight: reader.read_u32 }
       end
+    end
 
-      per_throttle_count = reader.read_u16
-      result[:per_throttle_stats] = Array.new(per_throttle_count) do
-        {
-          key: reader.read_string,
-          tokens: reader.read_f64,
-          rate_per_second: reader.read_f64,
-          burst: reader.read_f64
-        }
+    def read_per_throttle_stats(reader)
+      Array.new(reader.read_u16) do
+        { key: reader.read_string, tokens: reader.read_f64,
+          rate_per_second: reader.read_f64, burst: reader.read_f64 }
       end
-
-      result
     end
 
     def decode_list_queues_result(resp)

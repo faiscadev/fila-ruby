@@ -2,7 +2,7 @@
 
 module Fila
   module FIBP
-    # Protocol opcodes for the Fila binary protocol.
+    # Protocol opcodes matching the server's fila-fibp crate.
     module Opcodes
       # Control opcodes (0x00-0x0F)
       HANDSHAKE       = 0x01
@@ -15,13 +15,13 @@ module Fila
       ENQUEUE         = 0x10
       ENQUEUE_RESULT  = 0x11
       CONSUME         = 0x12
-      DELIVERY        = 0x13
-      CANCEL_CONSUME  = 0x14
-      ACK             = 0x15
-      ACK_RESULT      = 0x16
-      NACK            = 0x17
-      NACK_RESULT     = 0x18
-      CONSUME_OK      = 0x19
+      CONSUME_OK      = 0x13
+      DELIVERY        = 0x14
+      CANCEL_CONSUME  = 0x15
+      ACK             = 0x16
+      ACK_RESULT      = 0x17
+      NACK            = 0x18
+      NACK_RESULT     = 0x19
 
       # Error opcode
       ERROR           = 0xFE
