@@ -1,20 +1,15 @@
 # frozen_string_literal: true
 
-require 'grpc'
-
-# Add proto directory to load path so generated requires resolve correctly.
-$LOAD_PATH.unshift(File.expand_path('proto', __dir__)) unless $LOAD_PATH.include?(File.expand_path('proto', __dir__))
-
-require_relative 'proto/fila/v1/service_services_pb'
 require_relative 'errors'
 require_relative 'consume_message'
 require_relative 'enqueue_result'
 require_relative 'batcher'
+require_relative 'fibp/opcodes'
+require_relative 'fibp/codec'
+require_relative 'fibp/connection'
 
 module Fila
-  # Client for the Fila message broker.
-  #
-  # Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
+  # Client for the Fila message broker over the FIBP binary protocol.
   #
   # @example Plain-text, default auto-batching
   #   client = Fila::Client.new("localhost:5555")
@@ -22,12 +17,9 @@ module Fila
   # @example Batching disabled
   #   client = Fila::Client.new("localhost:5555", batch_mode: :disabled)
   #
-  # @example Linger-based batching
+  # @example TLS with custom CA
   #   client = Fila::Client.new("localhost:5555",
-  #     batch_mode: :linger, linger_ms: 10, batch_size: 50)
-  #
-  # @example TLS with system trust store
-  #   client = Fila::Client.new("localhost:5555", tls: true)
+  #     ca_cert: File.read("ca.pem"))
   #
   # @example mTLS + API key
   #   client = Fila::Client.new("localhost:5555",
@@ -36,7 +28,6 @@ module Fila
   #     client_key: File.read("client-key.pem"),
   #     api_key: "fila_abc123")
   class Client # rubocop:disable Metrics/ClassLength
-    # Valid batch mode values.
     BATCH_MODES = %i[auto linger disabled].freeze
 
     private_constant :BATCH_MODES
@@ -48,18 +39,23 @@ module Fila
     # @param client_key [String, nil] PEM-encoded client key (mTLS)
     # @param api_key [String, nil] API key for authentication
     # @param batch_mode [Symbol] :auto (default), :linger, or :disabled
-    # @param max_batch_size [Integer] max batch size for auto mode (default: 100)
-    # @param batch_size [Integer] batch size for linger mode (default: 100)
-    # @param linger_ms [Integer] linger time in ms for linger mode (default: 10)
+    # @param max_batch_size [Integer] max batch size for auto mode
+    # @param batch_size [Integer] batch size for linger mode
+    # @param linger_ms [Integer] linger time in ms for linger mode
     def initialize( # rubocop:disable Metrics/ParameterLists
       addr, tls: false, ca_cert: nil, client_cert: nil, client_key: nil,
       api_key: nil, batch_mode: :auto, max_batch_size: 100,
       batch_size: 100, linger_ms: 10
     )
       validate_batch_mode(batch_mode)
+      @addr = addr
+      @tls = tls
+      @ca_cert = ca_cert
+      @client_cert = client_cert
+      @client_key = client_key
       @api_key = api_key
-      @credentials = build_credentials(tls: tls, ca_cert: ca_cert, client_cert: client_cert, client_key: client_key)
-      @stub = ::Fila::V1::FilaService::Stub.new(addr, @credentials)
+
+      @conn = build_connection(addr)
       @batcher = start_batcher(batch_mode, max_batch_size, batch_size, linger_ms)
     end
 
@@ -67,26 +63,18 @@ module Fila
     def close
       @batcher&.close
       @batcher = nil
+      @conn&.close
+      @conn = nil
     end
 
     # Enqueue a single message to a queue.
-    #
-    # When batching is enabled (default), the message is submitted to
-    # the background batcher. At low load each message is sent
-    # individually; at high load messages cluster into batches.
     #
     # @param queue [String] target queue name
     # @param payload [String] message payload
     # @param headers [Hash<String,String>, nil] optional headers
     # @return [String] broker-assigned message ID
-    # @raise [QueueNotFoundError] if the queue does not exist
-    # @raise [RPCError] for unexpected gRPC failures
     def enqueue(queue:, payload:, headers: nil)
-      msg = ::Fila::V1::EnqueueMessage.new(
-        queue: queue,
-        headers: headers || {},
-        payload: payload
-      )
+      msg = { queue: queue, headers: headers || {}, payload: payload }
 
       if @batcher
         @batcher.submit(msg)
@@ -95,41 +83,21 @@ module Fila
       end
     end
 
-    # Enqueue multiple messages in a single RPC call.
+    # Enqueue multiple messages in a single request.
     #
-    # Each message is independently validated and processed. A failed
-    # message does not affect the others. Returns an array of
-    # EnqueueResult with one result per input message, in order.
-    #
-    # This bypasses the background batcher and always uses the
-    # Enqueue RPC directly.
-    #
-    # @param messages [Array<Hash>] messages to enqueue; each hash has
-    #   keys :queue (String), :payload (String), and optionally
-    #   :headers (Hash<String,String>)
+    # @param messages [Array<Hash>] messages with :queue, :payload, :headers
     # @return [Array<EnqueueResult>]
-    # @raise [RPCError] for transport-level gRPC failures
     def enqueue_many(messages)
-      proto_messages = messages.map do |m|
-        ::Fila::V1::EnqueueMessage.new(
-          queue: m[:queue],
-          headers: m[:headers] || {},
-          payload: m[:payload]
-        )
+      return [] if messages.empty?
+
+      payload = encode_enqueue_batch(messages)
+      opcode, resp = @conn.request(FIBP::Opcodes::ENQUEUE, payload)
+
+      if opcode == FIBP::Opcodes::ERROR
+        raise_from_error_frame(resp)
       end
 
-      req = ::Fila::V1::EnqueueRequest.new(messages: proto_messages)
-      resp = @stub.enqueue(req, metadata: call_metadata)
-
-      resp.results.map do |r|
-        if r.result == :message_id
-          EnqueueResult.new(message_id: r.message_id)
-        else
-          EnqueueResult.new(error: r.error.message)
-        end
-      end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
+      decode_enqueue_results(resp)
     end
 
     # Open a streaming consumer. Yields messages as they arrive.
@@ -144,26 +112,27 @@ module Fila
     #
     # @param queue [String] queue the message belongs to
     # @param msg_id [String] ID of the message to acknowledge
-    # @raise [MessageNotFoundError] if the message does not exist
-    # @raise [RPCError] for unexpected gRPC failures
     def ack(queue:, msg_id:)
-      msg = ::Fila::V1::AckMessage.new(queue: queue, message_id: msg_id)
-      req = ::Fila::V1::AckRequest.new(messages: [msg])
-      resp = @stub.ack(req, metadata: call_metadata)
+      payload = FIBP::Codec.encode_u32(1) +
+                FIBP::Codec.encode_string(queue) +
+                FIBP::Codec.encode_string(msg_id)
+      opcode, resp = @conn.request(FIBP::Opcodes::ACK, payload)
 
-      result = resp.results.first
-      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
-      return if result.result == :success
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
 
-      err = result.error
-      case err.code
-      when :ACK_ERROR_CODE_MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "ack: #{err.message}"
+      reader = FIBP::Codec::Reader.new(resp)
+      count = reader.read_u32
+      raise RPCError.new(0xFF, 'no result from server') if count.zero?
+
+      code = reader.read_u8
+      return if code == FIBP::ErrorCodes::OK
+
+      case code
+      when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, "ack: message not found"
       else
-        raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "ack: #{err.message}")
+        raise RPCError.new(code, "ack failed")
       end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
     end
 
     # Negatively acknowledge a message that failed processing.
@@ -171,31 +140,250 @@ module Fila
     # @param queue [String] queue the message belongs to
     # @param msg_id [String] ID of the message to nack
     # @param error [String] description of the failure
-    # @raise [MessageNotFoundError] if the message does not exist
-    # @raise [RPCError] for unexpected gRPC failures
     def nack(queue:, msg_id:, error:)
-      msg = ::Fila::V1::NackMessage.new(queue: queue, message_id: msg_id, error: error)
-      req = ::Fila::V1::NackRequest.new(messages: [msg])
-      resp = @stub.nack(req, metadata: call_metadata)
+      payload = FIBP::Codec.encode_u32(1) +
+                FIBP::Codec.encode_string(queue) +
+                FIBP::Codec.encode_string(msg_id) +
+                FIBP::Codec.encode_string(error)
+      opcode, resp = @conn.request(FIBP::Opcodes::NACK, payload)
 
-      result = resp.results.first
-      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
-      return if result.result == :success
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
 
-      err = result.error
-      case err.code
-      when :NACK_ERROR_CODE_MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "nack: #{err.message}"
+      reader = FIBP::Codec::Reader.new(resp)
+      count = reader.read_u32
+      raise RPCError.new(0xFF, 'no result from server') if count.zero?
+
+      code = reader.read_u8
+      return if code == FIBP::ErrorCodes::OK
+
+      case code
+      when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, "nack: message not found"
       else
-        raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "nack: #{err.message}")
+        raise RPCError.new(code, "nack failed")
       end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
     end
 
-    LEADER_ADDR_KEY = 'x-fila-leader-addr'
+    # --- Admin operations ---
 
-    private_constant :LEADER_ADDR_KEY
+    # Create a queue.
+    #
+    # @param name [String] queue name
+    # @param on_enqueue_script [String, nil] Lua enqueue script
+    # @param on_failure_script [String, nil] Lua failure script
+    # @param visibility_timeout_ms [Integer] visibility timeout (0 = server default)
+    # @return [String] created queue ID
+    def create_queue(name:, on_enqueue_script: nil, on_failure_script: nil, visibility_timeout_ms: 0)
+      payload = FIBP::Codec.encode_string(name) +
+                FIBP::Codec.encode_optional_string(on_enqueue_script) +
+                FIBP::Codec.encode_optional_string(on_failure_script) +
+                FIBP::Codec.encode_u64(visibility_timeout_ms)
+      opcode, resp = @conn.request(FIBP::Opcodes::CREATE_QUEUE, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      queue_id = reader.read_string
+
+      case code
+      when FIBP::ErrorCodes::OK then queue_id
+      when FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS
+        raise QueueAlreadyExistsError, "queue '#{name}' already exists"
+      else
+        raise RPCError.new(code, "create queue failed")
+      end
+    end
+
+    # Delete a queue.
+    #
+    # @param queue [String] queue name
+    def delete_queue(queue:)
+      payload = FIBP::Codec.encode_string(queue)
+      opcode, resp = @conn.request(FIBP::Opcodes::DELETE_QUEUE, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      return if code == FIBP::ErrorCodes::OK
+
+      raise_for_error_code(code, 'delete queue')
+    end
+
+    # Get statistics for a queue.
+    #
+    # @param queue [String] queue name
+    # @return [Hash] queue statistics
+    def get_stats(queue:)
+      payload = FIBP::Codec.encode_string(queue)
+      opcode, resp = @conn.request(FIBP::Opcodes::GET_STATS, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      decode_stats_result(resp)
+    end
+
+    # List all queues.
+    #
+    # @return [Hash] with :cluster_node_count and :queues array
+    def list_queues
+      opcode, resp = @conn.request(FIBP::Opcodes::LIST_QUEUES, '')
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      decode_list_queues_result(resp)
+    end
+
+    # Set a runtime config key.
+    def set_config(key:, value:)
+      payload = FIBP::Codec.encode_string(key) + FIBP::Codec.encode_string(value)
+      opcode, resp = @conn.request(FIBP::Opcodes::SET_CONFIG, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      return if code == FIBP::ErrorCodes::OK
+
+      raise_for_error_code(code, 'set config')
+    end
+
+    # Get a runtime config value.
+    def get_config(key:)
+      payload = FIBP::Codec.encode_string(key)
+      opcode, resp = @conn.request(FIBP::Opcodes::GET_CONFIG, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'get config') unless code == FIBP::ErrorCodes::OK
+
+      reader.read_string
+    end
+
+    # List config keys by prefix.
+    def list_config(prefix:)
+      payload = FIBP::Codec.encode_string(prefix)
+      opcode, resp = @conn.request(FIBP::Opcodes::LIST_CONFIG, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'list config') unless code == FIBP::ErrorCodes::OK
+
+      count = reader.read_u16
+      Array.new(count) do
+        { key: reader.read_string, value: reader.read_string }
+      end
+    end
+
+    # Redrive messages from a DLQ back to their parent queue.
+    def redrive(dlq_queue:, count:)
+      payload = FIBP::Codec.encode_string(dlq_queue) + FIBP::Codec.encode_u64(count)
+      opcode, resp = @conn.request(FIBP::Opcodes::REDRIVE, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'redrive') unless code == FIBP::ErrorCodes::OK
+
+      reader.read_u64
+    end
+
+    # --- Auth operations ---
+
+    # Create an API key.
+    def create_api_key(name:, expires_at_ms: 0, is_superadmin: false)
+      payload = FIBP::Codec.encode_string(name) +
+                FIBP::Codec.encode_u64(expires_at_ms) +
+                FIBP::Codec.encode_bool(is_superadmin)
+      opcode, resp = @conn.request(FIBP::Opcodes::CREATE_API_KEY, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'create api key') unless code == FIBP::ErrorCodes::OK
+
+      { key_id: reader.read_string, key: reader.read_string, is_superadmin: reader.read_bool }
+    end
+
+    # Revoke an API key.
+    def revoke_api_key(key_id:)
+      payload = FIBP::Codec.encode_string(key_id)
+      opcode, resp = @conn.request(FIBP::Opcodes::REVOKE_API_KEY, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      return if code == FIBP::ErrorCodes::OK
+
+      raise_for_error_code(code, 'revoke api key')
+    end
+
+    # List all API keys.
+    def list_api_keys
+      opcode, resp = @conn.request(FIBP::Opcodes::LIST_API_KEYS, '')
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'list api keys') unless code == FIBP::ErrorCodes::OK
+
+      count = reader.read_u16
+      Array.new(count) do
+        {
+          key_id: reader.read_string, name: reader.read_string,
+          created_at_ms: reader.read_u64, expires_at_ms: reader.read_u64,
+          is_superadmin: reader.read_bool
+        }
+      end
+    end
+
+    # Set ACL permissions for an API key.
+    def set_acl(key_id:, permissions:)
+      payload = FIBP::Codec.encode_string(key_id) +
+                FIBP::Codec.encode_u16(permissions.size)
+      permissions.each do |perm|
+        payload += FIBP::Codec.encode_string(perm[:kind]) +
+                   FIBP::Codec.encode_string(perm[:pattern])
+      end
+      opcode, resp = @conn.request(FIBP::Opcodes::SET_ACL, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      return if code == FIBP::ErrorCodes::OK
+
+      raise_for_error_code(code, 'set acl')
+    end
+
+    # Get ACL permissions for an API key.
+    def get_acl(key_id:)
+      payload = FIBP::Codec.encode_string(key_id)
+      opcode, resp = @conn.request(FIBP::Opcodes::GET_ACL, payload)
+
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
+
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      raise_for_error_code(code, 'get acl') unless code == FIBP::ErrorCodes::OK
+
+      key_id_resp = reader.read_string
+      is_superadmin = reader.read_bool
+      perm_count = reader.read_u16
+      permissions = Array.new(perm_count) do
+        { kind: reader.read_string, pattern: reader.read_string }
+      end
+      { key_id: key_id_resp, is_superadmin: is_superadmin, permissions: permissions }
+    end
 
     private
 
@@ -205,12 +393,30 @@ module Fila
       raise ArgumentError, "invalid batch_mode: #{mode.inspect}, must be one of #{BATCH_MODES.inspect}"
     end
 
+    def build_connection(addr)
+      host, port_str = addr.split(':')
+      port = port_str.to_i
+      validate_tls_options
+      FIBP::Connection.new(
+        host: host, port: port,
+        tls: @tls, ca_cert: @ca_cert,
+        client_cert: @client_cert, client_key: @client_key,
+        api_key: @api_key
+      )
+    end
+
+    def validate_tls_options
+      tls_enabled = @tls || @ca_cert
+      return if tls_enabled || (!@client_cert && !@client_key)
+
+      raise ArgumentError, 'tls: true or ca_cert is required when client_cert or client_key is provided'
+    end
+
     def start_batcher(mode, max_batch_size, batch_size, linger_ms)
       return nil if mode == :disabled
 
       Batcher.new(
-        stub: @stub,
-        metadata: call_metadata,
+        conn: @conn,
         mode: mode,
         max_batch_size: max_batch_size,
         batch_size: batch_size,
@@ -218,98 +424,176 @@ module Fila
       )
     end
 
-    # Send a single message via the unified Enqueue RPC.
     def enqueue_single(msg)
-      req = ::Fila::V1::EnqueueRequest.new(messages: [msg])
-      resp = @stub.enqueue(req, metadata: call_metadata)
+      payload = encode_enqueue_batch([msg])
+      opcode, resp = @conn.request(FIBP::Opcodes::ENQUEUE, payload)
 
-      result = resp.results.first
-      raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, 'no result from server') if result.nil?
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
 
-      if result.result == :message_id
-        result.message_id
+      reader = FIBP::Codec::Reader.new(resp)
+      count = reader.read_u32
+      raise RPCError.new(0xFF, 'no result from server') if count.zero?
+
+      code = reader.read_u8
+      msg_id = reader.read_string
+
+      case code
+      when FIBP::ErrorCodes::OK then msg_id
+      when FIBP::ErrorCodes::QUEUE_NOT_FOUND
+        raise QueueNotFoundError, "enqueue: queue not found"
       else
-        err = result.error
-        case err.code
-        when :ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND
-          raise QueueNotFoundError, "enqueue: #{err.message}"
+        raise RPCError.new(code, "enqueue failed")
+      end
+    end
+
+    def encode_enqueue_batch(messages)
+      payload = FIBP::Codec.encode_u32(messages.size)
+      messages.each do |m|
+        payload += FIBP::Codec.encode_string(m[:queue]) +
+                   FIBP::Codec.encode_map(m[:headers] || {}) +
+                   FIBP::Codec.encode_bytes(m[:payload])
+      end
+      payload
+    end
+
+    def decode_enqueue_results(resp)
+      reader = FIBP::Codec::Reader.new(resp)
+      count = reader.read_u32
+      Array.new(count) do
+        code = reader.read_u8
+        msg_id = reader.read_string
+        if code == FIBP::ErrorCodes::OK
+          EnqueueResult.new(message_id: msg_id)
         else
-          raise RPCError.new(GRPC::Core::StatusCodes::INTERNAL, "enqueue: #{err.message}")
+          EnqueueResult.new(error: error_name(code))
         end
       end
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
     end
 
-    def consume_with_redirect(queue:, redirected:, &block)
-      stream = @stub.consume(::Fila::V1::ConsumeRequest.new(queue: queue), metadata: call_metadata)
-      stream.each do |resp|
-        yield_messages_from_response(resp, &block)
+    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics/MethodLength
+      payload = FIBP::Codec.encode_string(queue)
+
+      delivery_queue = Queue.new
+      consumer_done = false
+      rid = nil
+
+      begin
+        rid, response = @conn.subscribe(FIBP::Opcodes::CONSUME, payload) do |_opcode, del_payload|
+          delivery_queue.push(del_payload) unless consumer_done
+        end
+
+        opcode, resp_payload = response
+        raise_from_error_frame(resp_payload) if opcode == FIBP::Opcodes::ERROR
+
+        # Process deliveries from the queue.
+        loop do
+          del_payload = delivery_queue.pop
+          break if del_payload.nil?
+
+          process_delivery(del_payload, &block)
+        end
+      rescue NotLeaderError => e
+        raise if redirected || e.leader_addr.nil?
+
+        reconnect_to(e.leader_addr)
+        return consume_with_redirect(queue: queue, redirected: true, &block)
+      rescue LocalJumpError
+        nil # Consumer break
       end
-    rescue GRPC::Cancelled then nil
-    rescue GRPC::NotFound => e
-      raise QueueNotFoundError, "consume: #{e.details}"
-    rescue GRPC::Unavailable => e
-      raise RPCError.new(e.code, e.details) if (leader_addr = extract_leader_addr(e)).nil? || redirected
-
-      @stub = ::Fila::V1::FilaService::Stub.new(leader_addr, @credentials)
-      consume_with_redirect(queue: queue, redirected: true, &block)
-    rescue GRPC::BadStatus => e
-      raise RPCError.new(e.code, e.details)
+    ensure
+      consumer_done = true
+      @conn&.cancel_consume(rid) if rid
     end
 
-    # Unpack messages from a ConsumeResponse.
-    def yield_messages_from_response(resp, &block)
-      resp.messages.each do |msg|
-        next if msg.nil? || msg.id.empty?
-
-        block.call(build_consume_message(msg))
-      end
-    end
-
-    def extract_leader_addr(err)
-      err.metadata[LEADER_ADDR_KEY]
-    rescue StandardError
-      nil
-    end
-
-    def build_credentials(tls:, ca_cert:, client_cert:, client_key:)
-      tls_enabled = tls || ca_cert
-      validate_tls_options(tls_enabled, client_cert, client_key)
-      return :this_channel_is_insecure unless tls_enabled
-
-      build_channel_credentials(ca_cert, client_cert, client_key)
-    end
-
-    def validate_tls_options(tls_enabled, client_cert, client_key)
-      return if tls_enabled || (!client_cert && !client_key)
-
-      raise ArgumentError, 'tls: true or ca_cert is required when client_cert or client_key is provided'
-    end
-
-    def build_channel_credentials(ca_cert, client_cert, client_key)
-      if ca_cert then GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
-      elsif client_cert && client_key then GRPC::Core::ChannelCredentials.new(nil, client_key, client_cert)
-      else GRPC::Core::ChannelCredentials.new
+    def process_delivery(payload, &block)
+      reader = FIBP::Codec::Reader.new(payload)
+      count = reader.read_u32
+      count.times do
+        msg = decode_delivery_message(reader)
+        block.call(msg)
       end
     end
 
-    def call_metadata
-      return {} unless @api_key
+    def decode_delivery_message(reader)
+      msg_id = reader.read_string
+      queue = reader.read_string
+      headers = reader.read_map
+      payload = reader.read_bytes
+      fairness_key = reader.read_string
+      _weight = reader.read_u32
+      _throttle_keys = reader.read_string_array
+      attempt_count = reader.read_u32
+      _enqueued_at = reader.read_u64
+      _leased_at = reader.read_u64
 
-      { 'authorization' => "Bearer #{@api_key}" }
-    end
-
-    def build_consume_message(msg)
-      metadata = msg.metadata
       ConsumeMessage.new(
-        id: msg.id,
-        headers: msg.headers.to_h,
-        payload: msg.payload,
-        fairness_key: metadata&.fairness_key.to_s,
-        attempt_count: metadata&.attempt_count.to_i,
-        queue: metadata&.queue_id.to_s
+        id: msg_id,
+        headers: headers,
+        payload: payload,
+        fairness_key: fairness_key,
+        attempt_count: attempt_count,
+        queue: queue
       )
+    end
+
+    def reconnect_to(addr)
+      @conn&.close
+      @conn = build_connection(addr)
+    end
+
+    def raise_from_error_frame(resp)
+      reader = FIBP::Codec::Reader.new(resp)
+      code = reader.read_u8
+      message = reader.read_string
+      metadata = reader.remaining.positive? ? reader.read_map : {}
+
+      case code
+      when FIBP::ErrorCodes::QUEUE_NOT_FOUND
+        raise QueueNotFoundError, message
+      when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, message
+      when FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS
+        raise QueueAlreadyExistsError, message
+      when FIBP::ErrorCodes::UNAUTHORIZED
+        raise AuthenticationError, message
+      when FIBP::ErrorCodes::FORBIDDEN
+        raise ForbiddenError, message
+      when FIBP::ErrorCodes::NOT_LEADER
+        raise NotLeaderError.new(message, leader_addr: metadata['leader_addr'])
+      when FIBP::ErrorCodes::API_KEY_NOT_FOUND
+        raise ApiKeyNotFoundError, message
+      else
+        raise RPCError.new(code, message)
+      end
+    end
+
+    def raise_for_error_code(code, context)
+      case code
+      when FIBP::ErrorCodes::QUEUE_NOT_FOUND
+        raise QueueNotFoundError, "#{context}: queue not found"
+      when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
+        raise MessageNotFoundError, "#{context}: message not found"
+      when FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS
+        raise QueueAlreadyExistsError, "#{context}: queue already exists"
+      when FIBP::ErrorCodes::UNAUTHORIZED
+        raise AuthenticationError, "#{context}: unauthorized"
+      when FIBP::ErrorCodes::FORBIDDEN
+        raise ForbiddenError, "#{context}: forbidden"
+      when FIBP::ErrorCodes::API_KEY_NOT_FOUND
+        raise ApiKeyNotFoundError, "#{context}: api key not found"
+      else
+        raise RPCError.new(code, "#{context} failed")
+      end
+    end
+
+    def error_name(code)
+      case code
+      when FIBP::ErrorCodes::QUEUE_NOT_FOUND then 'queue not found'
+      when FIBP::ErrorCodes::MESSAGE_NOT_FOUND then 'message not found'
+      when FIBP::ErrorCodes::UNAUTHORIZED then 'unauthorized'
+      when FIBP::ErrorCodes::FORBIDDEN then 'forbidden'
+      else "error code 0x#{code.to_s(16).rjust(2, '0')}"
+      end
     end
   end
 end

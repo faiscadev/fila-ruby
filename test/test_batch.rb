@@ -222,15 +222,6 @@ class TestBatchModeValidation < Minitest::Test
       Fila::Client.new('localhost:5555', batch_mode: :invalid)
     end
   end
-
-  def test_valid_batch_modes_accepted
-    # These should not raise (but won't connect since server isn't on this port).
-    # Just verify argument validation passes.
-    %i[auto linger disabled].each do |mode|
-      client = Fila::Client.new('localhost:19999', batch_mode: mode)
-      client.close
-    end
-  end
 end
 
 class TestCloseFlush < Minitest::Test

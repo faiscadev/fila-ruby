@@ -3,12 +3,9 @@
 require 'minitest/autorun'
 require 'tmpdir'
 require 'socket'
-require 'grpc'
 
 $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
-$LOAD_PATH.unshift File.expand_path('../lib/fila/proto', __dir__)
 require 'fila'
-require_relative '../lib/fila/proto/fila/v1/admin_services_pb'
 
 FILA_SERVER_BIN = ENV.fetch('FILA_SERVER_BIN') do
   File.join(__dir__, '..', '..', 'fila', 'target', 'release', 'fila-server')
@@ -25,10 +22,9 @@ module TestServerHelper
 
   # Start a fila-server instance.
   #
-  # @param tls_config [Hash, nil] optional TLS configuration with keys:
-  #   :ca_cert_path, :server_cert_path, :server_key_path
+  # @param tls_config [Hash, nil] optional TLS configuration
   # @param bootstrap_apikey [String, nil] optional bootstrap API key
-  # @return [Hash] server info with :addr, :pid, :data_dir, :admin_stub
+  # @return [Hash] server info with :addr, :pid, :data_dir, etc.
   def self.start(tls_config: nil, bootstrap_apikey: nil)
     port = find_free_port
     addr = "127.0.0.1:#{port}"
@@ -62,28 +58,24 @@ module TestServerHelper
       )
     end
 
-    # Build credentials for admin stub.
-    # client_ca_cert_path is always needed to verify server cert; ca_cert_path is only for mTLS.
-    credentials = :this_channel_is_insecure
+    # Build connection options for admin operations.
+    conn_opts = { tls: false }
     if tls_config
       ca_path = tls_config[:client_ca_cert_path] || tls_config[:ca_cert_path]
       if ca_path
-        ca_cert = File.read(ca_path)
-        client_key = tls_config[:client_key_path] ? File.read(tls_config[:client_key_path]) : nil
-        client_cert = tls_config[:client_cert_path] ? File.read(tls_config[:client_cert_path]) : nil
-        credentials = GRPC::Core::ChannelCredentials.new(ca_cert, client_key, client_cert)
+        conn_opts[:ca_cert] = File.read(ca_path)
+        conn_opts[:client_cert] = File.read(tls_config[:client_cert_path]) if tls_config[:client_cert_path]
+        conn_opts[:client_key] = File.read(tls_config[:client_key_path]) if tls_config[:client_key_path]
       end
     end
-
-    admin_metadata = {}
-    admin_metadata['authorization'] = "Bearer #{bootstrap_apikey}" if bootstrap_apikey
+    conn_opts[:api_key] = bootstrap_apikey if bootstrap_apikey
 
     # Wait for server ready.
     deadline = Time.now + 10
     ready = false
     while Time.now < deadline
       begin
-        try_list_queues(addr, credentials: credentials, metadata: admin_metadata)
+        try_list_queues(addr, conn_opts)
         ready = true
         break
       rescue StandardError
@@ -103,14 +95,11 @@ module TestServerHelper
       raise "fila-server failed to start within 10s on #{addr}\nConfig:\n#{toml}\nStderr:\n#{stderr_output}"
     end
 
-    admin_stub = ::Fila::V1::FilaAdmin::Stub.new(addr, credentials)
-
     {
       addr: addr,
       pid: pid,
       data_dir: data_dir,
-      admin_stub: admin_stub,
-      admin_metadata: admin_metadata
+      conn_opts: conn_opts
     }
   end
 
@@ -123,12 +112,14 @@ module TestServerHelper
   end
 
   def self.create_queue(server, name)
-    req = ::Fila::V1::CreateQueueRequest.new(name: name, config: {})
-    server[:admin_stub].create_queue(req, metadata: server[:admin_metadata] || {})
+    client = Fila::Client.new(server[:addr], batch_mode: :disabled, **server[:conn_opts])
+    client.create_queue(name: name)
+    client.close
   end
 
-  def self.try_list_queues(addr, credentials: :this_channel_is_insecure, metadata: {})
-    stub = ::Fila::V1::FilaAdmin::Stub.new(addr, credentials)
-    stub.list_queues(::Fila::V1::ListQueuesRequest.new, metadata: metadata)
+  def self.try_list_queues(addr, conn_opts)
+    client = Fila::Client.new(addr, batch_mode: :disabled, **conn_opts)
+    client.list_queues
+    client.close
   end
 end
