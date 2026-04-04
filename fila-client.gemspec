@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.version = Fila::VERSION
   spec.authors = ['Faisca']
   spec.summary = 'Ruby client SDK for the Fila message broker'
-  spec.description = "Idiomatic Ruby client for the Fila message broker using the FIBP binary protocol."
+  spec.description = 'Idiomatic Ruby client for the Fila message broker using the FIBP binary protocol.'
   spec.homepage = 'https://github.com/faiscadev/fila-ruby'
   spec.license = 'AGPL-3.0-or-later'
   spec.required_ruby_version = '>= 3.1'

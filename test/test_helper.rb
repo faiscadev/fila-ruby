@@ -3,6 +3,7 @@
 require 'minitest/autorun'
 require 'tmpdir'
 require 'socket'
+require 'timeout'
 
 $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
 require 'fila'
@@ -75,11 +76,11 @@ module TestServerHelper
     ready = false
     while Time.now < deadline
       begin
-        try_list_queues(addr, conn_opts)
+        Timeout.timeout(3) { try_list_queues(addr, conn_opts) }
         ready = true
         break
       rescue StandardError
-        sleep 0.05
+        sleep 0.1
       end
     end
 
@@ -112,14 +113,18 @@ module TestServerHelper
   end
 
   def self.create_queue(server, name)
+    client = nil
     client = Fila::Client.new(server[:addr], batch_mode: :disabled, **server[:conn_opts])
     client.create_queue(name: name)
-    client.close
+  ensure
+    client&.close
   end
 
   def self.try_list_queues(addr, conn_opts)
+    client = nil
     client = Fila::Client.new(addr, batch_mode: :disabled, **conn_opts)
     client.list_queues
-    client.close
+  ensure
+    client&.close
   end
 end

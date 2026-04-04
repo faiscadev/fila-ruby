@@ -93,9 +93,7 @@ module Fila
       payload = encode_enqueue_batch(messages)
       opcode, resp = @conn.request(FIBP::Opcodes::ENQUEUE, payload)
 
-      if opcode == FIBP::Opcodes::ERROR
-        raise_from_error_frame(resp)
-      end
+      raise_from_error_frame(resp) if opcode == FIBP::Opcodes::ERROR
 
       decode_enqueue_results(resp)
     end
@@ -129,9 +127,9 @@ module Fila
 
       case code
       when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "ack: message not found"
+        raise MessageNotFoundError, 'ack: message not found'
       else
-        raise RPCError.new(code, "ack failed")
+        raise RPCError.new(code, 'ack failed')
       end
     end
 
@@ -158,9 +156,9 @@ module Fila
 
       case code
       when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, "nack: message not found"
+        raise MessageNotFoundError, 'nack: message not found'
       else
-        raise RPCError.new(code, "nack failed")
+        raise RPCError.new(code, 'nack failed')
       end
     end
 
@@ -191,7 +189,7 @@ module Fila
       when FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS
         raise QueueAlreadyExistsError, "queue '#{name}' already exists"
       else
-        raise RPCError.new(code, "create queue failed")
+        raise RPCError.new(code, 'create queue failed')
       end
     end
 
@@ -440,9 +438,9 @@ module Fila
       case code
       when FIBP::ErrorCodes::OK then msg_id
       when FIBP::ErrorCodes::QUEUE_NOT_FOUND
-        raise QueueNotFoundError, "enqueue: queue not found"
+        raise QueueNotFoundError, 'enqueue: queue not found'
       else
-        raise RPCError.new(code, "enqueue failed")
+        raise RPCError.new(code, 'enqueue failed')
       end
     end
 
@@ -470,39 +468,45 @@ module Fila
       end
     end
 
-    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics/MethodLength
+    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics
       payload = FIBP::Codec.encode_string(queue)
-
       delivery_queue = Queue.new
       consumer_done = false
       rid = nil
 
-      begin
-        rid, response = @conn.subscribe(FIBP::Opcodes::CONSUME, payload) do |_opcode, del_payload|
-          delivery_queue.push(del_payload) unless consumer_done
-        end
+      rid, response = subscribe_to_queue(payload, delivery_queue, consumer_done)
+      check_consume_response(response)
+      consume_delivery_loop(delivery_queue, &block)
+    rescue NotLeaderError => e
+      raise if redirected || e.leader_addr.nil?
 
-        opcode, resp_payload = response
-        raise_from_error_frame(resp_payload) if opcode == FIBP::Opcodes::ERROR
-
-        # Process deliveries from the queue.
-        loop do
-          del_payload = delivery_queue.pop
-          break if del_payload.nil?
-
-          process_delivery(del_payload, &block)
-        end
-      rescue NotLeaderError => e
-        raise if redirected || e.leader_addr.nil?
-
-        reconnect_to(e.leader_addr)
-        return consume_with_redirect(queue: queue, redirected: true, &block)
-      rescue LocalJumpError
-        nil # Consumer break
-      end
+      reconnect_to(e.leader_addr)
+      consume_with_redirect(queue: queue, redirected: true, &block)
+    rescue LocalJumpError
+      nil # Consumer break
     ensure
       consumer_done = true
       @conn&.cancel_consume(rid) if rid
+    end
+
+    def subscribe_to_queue(payload, delivery_queue, consumer_done)
+      @conn.subscribe(FIBP::Opcodes::CONSUME, payload) do |_opcode, del_payload|
+        delivery_queue.push(del_payload) unless consumer_done
+      end
+    end
+
+    def check_consume_response(response)
+      opcode, resp_payload = response
+      raise_from_error_frame(resp_payload) if opcode == FIBP::Opcodes::ERROR
+    end
+
+    def consume_delivery_loop(delivery_queue, &block)
+      loop do
+        del_payload = delivery_queue.pop
+        break if del_payload.nil?
+
+        process_delivery(del_payload, &block)
+      end
     end
 
     def process_delivery(payload, &block)
@@ -541,30 +545,29 @@ module Fila
       @conn = build_connection(addr)
     end
 
+    ERROR_CODE_TO_CLASS = {
+      FIBP::ErrorCodes::QUEUE_NOT_FOUND => QueueNotFoundError,
+      FIBP::ErrorCodes::MESSAGE_NOT_FOUND => MessageNotFoundError,
+      FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS => QueueAlreadyExistsError,
+      FIBP::ErrorCodes::UNAUTHORIZED => AuthenticationError,
+      FIBP::ErrorCodes::FORBIDDEN => ForbiddenError,
+      FIBP::ErrorCodes::API_KEY_NOT_FOUND => ApiKeyNotFoundError
+    }.freeze
+
     def raise_from_error_frame(resp)
       reader = FIBP::Codec::Reader.new(resp)
       code = reader.read_u8
       message = reader.read_string
       metadata = reader.remaining.positive? ? reader.read_map : {}
 
-      case code
-      when FIBP::ErrorCodes::QUEUE_NOT_FOUND
-        raise QueueNotFoundError, message
-      when FIBP::ErrorCodes::MESSAGE_NOT_FOUND
-        raise MessageNotFoundError, message
-      when FIBP::ErrorCodes::QUEUE_ALREADY_EXISTS
-        raise QueueAlreadyExistsError, message
-      when FIBP::ErrorCodes::UNAUTHORIZED
-        raise AuthenticationError, message
-      when FIBP::ErrorCodes::FORBIDDEN
-        raise ForbiddenError, message
-      when FIBP::ErrorCodes::NOT_LEADER
+      if code == FIBP::ErrorCodes::NOT_LEADER
         raise NotLeaderError.new(message, leader_addr: metadata['leader_addr'])
-      when FIBP::ErrorCodes::API_KEY_NOT_FOUND
-        raise ApiKeyNotFoundError, message
-      else
-        raise RPCError.new(code, message)
       end
+
+      klass = ERROR_CODE_TO_CLASS[code]
+      raise klass, message if klass
+
+      raise RPCError.new(code, message)
     end
 
     def raise_for_error_code(code, context)

@@ -6,7 +6,7 @@ module Fila
   # and linger (timer-based) modes.
   #
   # @api private
-  class Batcher # rubocop:disable Metrics/ClassLength
+  class Batcher
     # An item queued for batching, pairing a message hash with its result slot.
     BatchItem = Struct.new(:message, :result_queue, keyword_init: true)
 
@@ -123,32 +123,31 @@ module Fila
 
     # Flush a batch of items via FIBP Enqueue.
     def flush_batch(items)
-      messages = items.map(&:message)
-      payload = encode_enqueue_batch(messages)
-      opcode, resp = @conn.request(FIBP::Opcodes::ENQUEUE, payload)
+      opcode, resp = send_enqueue_batch(items)
+      handle_flush_error(items, resp) && return if opcode == FIBP::Opcodes::ERROR
 
-      if opcode == FIBP::Opcodes::ERROR
-        reader = FIBP::Codec::Reader.new(resp)
-        code = reader.read_u8
-        message = reader.read_string
-        broadcast_error(items, RPCError.new(code, message))
-        return
-      end
-
-      reader = FIBP::Codec::Reader.new(resp)
-      count = reader.read_u32
-
-      items.each_with_index do |item, idx|
-        if idx < count
-          code = reader.read_u8
-          msg_id = reader.read_string
-          item.result_queue.push(result_to_outcome(code, msg_id))
-        else
-          item.result_queue.push(Fila::Error.new('no result from server'))
-        end
-      end
+      dispatch_results(items, resp)
     rescue StandardError => e
       broadcast_error(items, Fila::Error.new(e.message))
+    end
+
+    def send_enqueue_batch(items)
+      payload = encode_enqueue_batch(items.map(&:message))
+      @conn.request(FIBP::Opcodes::ENQUEUE, payload)
+    end
+
+    def handle_flush_error(items, resp)
+      reader = FIBP::Codec::Reader.new(resp)
+      broadcast_error(items, RPCError.new(reader.read_u8, reader.read_string))
+    end
+
+    def dispatch_results(items, resp)
+      reader = FIBP::Codec::Reader.new(resp)
+      count = reader.read_u32
+      items.each_with_index do |item, idx|
+        outcome = idx < count ? result_to_outcome(reader.read_u8, reader.read_string) : Fila::Error.new('no result from server')
+        item.result_queue.push(outcome)
+      end
     end
 
     def encode_enqueue_batch(messages)
@@ -165,9 +164,9 @@ module Fila
       case code
       when FIBP::ErrorCodes::OK then msg_id
       when FIBP::ErrorCodes::QUEUE_NOT_FOUND
-        QueueNotFoundError.new("enqueue: queue not found")
+        QueueNotFoundError.new('enqueue: queue not found')
       else
-        RPCError.new(code, "enqueue failed")
+        RPCError.new(code, 'enqueue failed')
       end
     end
 

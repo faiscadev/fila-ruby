@@ -94,11 +94,11 @@ module Fila
           @data.bytesize - @pos
         end
 
-        def read_raw(n)
-          raise ProtocolError, "unexpected end of frame (need #{n}, have #{remaining})" if remaining < n
+        def read_raw(size)
+          raise ProtocolError, "unexpected end of frame (need #{size}, have #{remaining})" if remaining < size
 
-          slice = @data.byteslice(@pos, n)
-          @pos += n
+          slice = @data.byteslice(@pos, size)
+          @pos += size
           slice
         end
 
@@ -129,7 +129,7 @@ module Fila
           read_raw(8).unpack1('G')
         end
 
-        def read_bool
+        def read_bool # rubocop:disable Naming/PredicateMethod
           read_u8 != 0
         end
 

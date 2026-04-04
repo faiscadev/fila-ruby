@@ -9,7 +9,7 @@ module Fila
     # TCP connection with TLS support, FIBP framing, handshake, and
     # request/response correlation. Supports both synchronous
     # request/response and asynchronous delivery streaming.
-    class Connection # rubocop:disable Metrics/ClassLength
+    class Connection
       PROTOCOL_VERSION = 1
       DEFAULT_MAX_FRAME_SIZE = 16 * 1024 * 1024 # 16 MiB
 
@@ -22,7 +22,7 @@ module Fila
       # @param client_cert [String, nil] PEM client certificate (mTLS)
       # @param client_key [String, nil] PEM client key (mTLS)
       # @param api_key [String, nil] API key for handshake auth
-      def initialize(host:, port:, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil)
+      def initialize(host:, port:, tls: false, ca_cert: nil, client_cert: nil, client_key: nil, api_key: nil) # rubocop:disable Metrics/ParameterLists
         @host = host
         @port = port
         @api_key = api_key
@@ -235,44 +235,48 @@ module Fila
         [opcode, payload]
       end
 
-      def read_frame_with_id
+      def read_frame_with_id # rubocop:disable Metrics/AbcSize
         @read_monitor.synchronize do
           loop do
-            length_bytes = read_exact(4)
-            return [nil, nil, nil] if length_bytes.nil?
+            opcode, flags, request_id, payload = read_raw_frame
+            return [nil, nil, nil] if opcode.nil?
 
-            frame_length = length_bytes.unpack1('N')
-            body = read_exact(frame_length)
-            return [nil, nil, nil] if body.nil?
+            next buffer_continuation(request_id, opcode, payload) if flags.anybits?(FLAG_CONTINUATION)
 
-            opcode = body.getbyte(0)
-            flags = body.getbyte(1)
-            request_id = body.byteslice(2, 4).unpack1('N')
-            payload = body.byteslice(6..)
-
-            continuation = (flags & FLAG_CONTINUATION) != 0
-
-            if continuation
-              @continuation_buffers[request_id] ||= { opcode: opcode, data: +''.b }
-              @continuation_buffers[request_id][:data] << payload
-              next
-            end
-
-            if @continuation_buffers.key?(request_id)
-              buf = @continuation_buffers.delete(request_id)
-              payload = buf[:data] + payload
-              opcode = buf[:opcode]
-            end
-
+            opcode, payload = reassemble_continuation(request_id, opcode, payload)
             return [opcode, payload, request_id]
           end
         end
       end
 
-      def read_exact(n)
+      def read_raw_frame
+        length_bytes = read_exact(4)
+        return [nil, nil, nil, nil] if length_bytes.nil?
+
+        body = read_exact(length_bytes.unpack1('N'))
+        return [nil, nil, nil, nil] if body.nil?
+
+        [body.getbyte(0), body.getbyte(1), body.byteslice(2, 4).unpack1('N'), body.byteslice(6..)]
+      end
+
+      def buffer_continuation(request_id, opcode, payload)
+        @continuation_buffers[request_id] ||= { opcode: opcode, data: +''.b }
+        @continuation_buffers[request_id][:data] << payload
+      end
+
+      def reassemble_continuation(request_id, opcode, payload)
+        if @continuation_buffers.key?(request_id)
+          buf = @continuation_buffers.delete(request_id)
+          [buf[:opcode], buf[:data] + payload]
+        else
+          [opcode, payload]
+        end
+      end
+
+      def read_exact(size)
         buf = +''.b
-        while buf.bytesize < n
-          chunk = @socket.read(n - buf.bytesize)
+        while buf.bytesize < size
+          chunk = @socket.read(size - buf.bytesize)
           return nil if chunk.nil? || chunk.empty?
 
           buf << chunk
