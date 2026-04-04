@@ -479,7 +479,7 @@ module Fila
       end
     end
 
-    def consume_with_redirect(queue:, redirected:, &block) # rubocop:disable Metrics/CyclomaticComplexity
+    def consume_with_redirect(queue:, redirected:, &)
       payload = FIBP::Codec.encode_string(queue)
       delivery_queue = Queue.new
       done = [false] # mutable container for closure capture
@@ -487,20 +487,24 @@ module Fila
 
       rid, response = subscribe_to_queue(payload, delivery_queue, done)
       check_consume_response(response)
-      consume_delivery_loop(delivery_queue, &block)
+      consume_delivery_loop(delivery_queue, &)
     rescue NotLeaderError => e
-      raise if redirected || e.leader_addr.nil?
-
-      done[0] = true
-      @conn&.cancel_consume(rid) if rid
-      rid = nil
-      reconnect_to(e.leader_addr)
-      consume_with_redirect(queue: queue, redirected: true, &block)
+      rid = handle_not_leader_redirect(e, rid, done, redirected, queue, &)
     rescue LocalJumpError
       nil # Consumer break
     ensure
       done[0] = true
       @conn&.cancel_consume(rid) if rid
+    end
+
+    def handle_not_leader_redirect(error, rid, done, redirected, queue, &)
+      raise error if redirected || error.leader_addr.nil?
+
+      done[0] = true
+      @conn&.cancel_consume(rid) if rid
+      reconnect_to(error.leader_addr)
+      consume_with_redirect(queue: queue, redirected: true, &)
+      nil
     end
 
     def subscribe_to_queue(payload, delivery_queue, done)
